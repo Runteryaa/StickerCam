@@ -9,6 +9,7 @@ Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanima
 ## Uygulama kimliği
 
 - Görünen ad: **StickerCam**
+- Hedef platformlar: **Android ve iOS** (web desteği kaldırıldı)
 - Android `package` / iOS `bundleIdentifier`: **`com.runterya.sticker`**
 - URL şeması: `stickercam`
 - EAS projesi: [`@runterya/stickercam`](https://expo.dev/accounts/runterya/projects/stickercam)
@@ -97,9 +98,11 @@ günceller.
 1. Node 22 + Java 17 kurar, `npm ci` ile bağımlılıkları yükler.
 2. `app.json` içindeki sürümü `package.json`'dan, `versionCode`'u GitHub run
    numarasından yazar.
-3. Android NDK 27.1'i kurar ve `npx expo prebuild --platform android` çalıştırır.
-4. `arm64-v8a` için release APK üretir.
-5. `EXPO_TOKEN` varsa `production` kanalına OTA güncellemesi yayınlar.
+3. `EXPO_TOKEN` varsa **APK build'inden önce** `production` kanalına OTA
+   güncellemesi yayınlar.
+4. `npx expo prebuild --platform android` çalıştırır ve yalnızca
+   `arm64-v8a` ABI'sini bırakır.
+5. `arm64-v8a` için release APK üretir.
 6. APK'yı workflow artifact'i ve GitHub Release olarak yükler.
 
 GitHub reposuna **`EXPO_TOKEN`** adında bir secret eklenmeli:

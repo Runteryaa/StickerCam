@@ -37,6 +37,16 @@ jobs:
           distribution: zulu
           java-version: '17'
 
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
@@ -60,38 +70,27 @@ jobs:
           echo "TAG=v${VERSION}-${BUILD}" >> "$GITHUB_ENV"
           echo "Building StickerCam ${VERSION} (${BUILD})"
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('package-lock.json', 'app.json') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: Install Android NDK
+      # OTA must be published before the APK build so users on the current
+      # runtime version receive the same JS bundle that goes into this APK.
+      - name: Publish OTA update
+        if: ${{ env.EXPO_TOKEN != '' }}
         run: |
-          set -euo pipefail
-          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          NDK_VERSION="27.1.12297006"
-
-          if [ ! -d "$SDK_DIR/ndk/$NDK_VERSION" ]; then
-            for attempt in 1 2 3; do
-              if echo "y" | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION"; then
-                break
-              fi
-              echo "NDK install attempt $attempt failed; retrying..."
-              sleep 10
-            done
-          fi
-
-          test -d "$SDK_DIR/ndk/$NDK_VERSION"
+          npx --yes eas-cli@latest update \
+            --channel production \
+            --platform android \
+            --environment production \
+            --non-interactive \
+            --message "StickerCam ${VERSION} (${BUILD}) - ${GITHUB_SHA::7}"
 
       - name: Prebuild Android
         run: npx expo prebuild --platform android --clean --no-install
         env:
           CI: 1
+
+      - name: Restrict ABI to arm64-v8a
+        run: |
+          sed -i 's/^reactNativeArchitectures=.*/reactNativeArchitectures=arm64-v8a/' android/gradle.properties
+          grep '^reactNativeArchitectures=' android/gradle.properties
 
       - name: Build release APK
         env:
@@ -112,20 +111,6 @@ jobs:
           APK="$(ls android/app/build/outputs/apk/release/*.apk | head -n 1)"
           mv "$APK" "StickerCam-${VERSION}-${BUILD}.apk"
           ls -lh "StickerCam-${VERSION}-${BUILD}.apk"
-
-      - name: Publish OTA update
-        if: ${{ env.EXPO_TOKEN != '' }}
-        run: |
-          npx --yes eas-cli@latest update \
-            --channel production \
-            --platform android \
-            --environment production \
-            --non-interactive \
-            --message "StickerCam ${VERSION} (${BUILD}) - ${GITHUB_SHA::7}"
-
-      - name: Warn when OTA is not configured
-        if: ${{ env.EXPO_TOKEN == '' }}
-        run: echo "::warning::EXPO_TOKEN GitHub secret is missing; OTA update was skipped."
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
