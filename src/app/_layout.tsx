@@ -44,6 +44,13 @@ export default function RootLayout() {
               contentStyle: { backgroundColor: Colors.stage },
             }}
           />
+          <Stack.Screen
+            name="export"
+            options={{
+              animation: 'slide_from_right',
+              contentStyle: { backgroundColor: Colors.paper },
+            }}
+          />
         </Stack>
       </SafeAreaProvider>
     </GestureHandlerRootView>

@@ -2,11 +2,14 @@
   "expo": {
     "name": "StickerCam",
     "slug": "stickercam",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "stickercam",
-    "platforms": ["android", "ios"],
+    "platforms": [
+      "android",
+      "ios"
+    ],
     "userInterfaceStyle": "light",
     "runtimeVersion": {
       "policy": "appVersion"
@@ -52,7 +55,9 @@
           "photosPermission": "StickerCam, sticker yapmak için galerindeki fotoğraflara erişir.",
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-sharing",
+      "./plugins/withWhatsAppStickers"
     ],
     "experiments": {
       "typedRoutes": true,

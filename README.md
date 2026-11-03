@@ -39,6 +39,15 @@ Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanima
   `stickers/index.json` manifestinde. Önizleme onaylanmadan dosya kalıcı dizine
   taşınmaz; vazgeçilen taslaklar cache'ten silinir.
 - **Defter (sticker tepsisi)**: ana ekranda grid, önizleme, silme, canlı sayaç.
+- **WhatsApp sticker paketi**: seçilen sticker'lar 512×512 şeffaf WebP'ye (≤100 KB)
+  ve 96×96 tray ikonuna dönüştürülür, `document/whatsapp-packs/<id>/` altına
+  yazılır. Paket, WhatsApp'ın beklediği `com.whatsapp.sticker.READ` izinli
+  `ContentProvider` üzerinden sunulur ve
+  `com.whatsapp.intent.action.ENABLE_STICKER_PACK` niyetiyle ekleme ekranı açılır.
+  Native provider `plugins/withWhatsAppStickers.js` config plugin'i ile üretilir;
+  bu yüzden paket aktarımı **Expo Go'da çalışmaz**, derlenmiş APK gerekir.
+- **Diğer uygulamalar**: önizlemedeki “Paylaş” aksiyonu sticker'ı şeffaf PNG
+  olarak sistem paylaşım menüsüne verir (Instagram, TikTok, mesaj uygulamaları).
 - **Görsel dil**: sıcak kağıt tonları, mercan vurgu, serif başlıklar; açık tema.
 
 ## Çalıştırma
@@ -73,7 +82,7 @@ npx expo-doctor      # bağımlılık / yapılandırma kontrolü
 `expo-updates` kuruldu ve EAS Update yapılandırıldı:
 
 - `updates.url`: `https://u.expo.dev/22b43827-b10e-43e5-b5ad-4eb2898bf88a`
-- `runtimeVersion`: `appVersion` (şu an `1.0.0`)
+- `runtimeVersion`: `appVersion` (şu an `1.1.0`)
 - Güncelleme kanalı: `production`
 - `checkAutomatically`: `ON_LOAD`
 
@@ -153,17 +162,22 @@ Bu, gerçek bir model değildir; dokunulan noktanın çevresinde elips kesim ür
 src/app/index.tsx            Sticker tepsisi (ana ekran)
 src/app/camera.tsx           Kamera + izin akışı
 src/app/editor.tsx           Bellekteki bekleyen fotoğrafı ObjectCutter'a köprü
+src/app/export.tsx           WhatsApp paketi oluşturma / sticker seçimi
 src/components/ObjectCutter.tsx     Lasso / dört köşe / akıllı seçim, kesim, önizleme, kaydetme
 src/components/ActionButton.tsx     Ortak buton
 src/components/TransparencyPreview.tsx  Damalı zemin önizlemesi
 src/services/imageService.ts        EXIF düzeltme + boyut normalizasyonu
 src/services/stickerService.ts      Sticker dosyaları + manifest
+src/services/whatsappStickerService.ts  512×512 WebP üretimi, paket manifesti, add-pack niyeti
+src/services/shareService.ts        Sistem paylaşım menüsü
 src/services/photoSession.ts        Kamera/galeri -> editör bellek aktarımı
 src/services/skiaImageLoader.ts     Güvenilir Skia görsel yükleme
 src/services/segmentationService.ts Sağlayıcı arayüzü, yerel/HTTP/demo sağlayıcı
 src/utils/geometry.ts               contain-fit ve koordinat dönüşümleri
 src/utils/lasso.ts                  Worklet uyumlu lasso / çokgen path üretimi
 src/utils/stickerImage.ts           Kırpma, sıkı bbox, beyaz kontur
+plugins/withWhatsAppStickers.js     WhatsApp ContentProvider'ı manifeste + Kotlin'e ekler
+plugins/whatsapp-stickers/StickerContentProvider.kt  Paketleri WhatsApp'a sunan native provider
 ```
 
 ## Sonraki faz

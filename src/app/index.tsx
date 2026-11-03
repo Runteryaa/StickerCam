@@ -1,6 +1,15 @@
 import { Image } from 'expo-image';
 import { router, useFocusEffect } from 'expo-router';
-import { Camera, Images, Layers, Sparkles, Trash2, X } from 'lucide-react-native';
+import {
+  Camera,
+  Images,
+  Layers,
+  Share2,
+  Sparkles,
+  Send,
+  Trash2,
+  X,
+} from 'lucide-react-native';
 import { useCallback, useState } from 'react';
 import {
   Alert,
@@ -17,6 +26,7 @@ import { ActionButton } from '@/components/ActionButton';
 import { TransparencyPreview } from '@/components/TransparencyPreview';
 import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
 import { usePhotoPicker } from '@/hooks/usePhotoPicker';
+import { shareStickerImage } from '@/services/shareService';
 import {
   deleteSticker,
   listStickers,
@@ -68,6 +78,22 @@ export default function HomeScreen() {
     router.push('/camera');
   }, []);
 
+  const sharePreview = useCallback(async () => {
+    if (!preview) {
+      return;
+    }
+    try {
+      await shareStickerImage(preview.uri);
+    } catch (error) {
+      Alert.alert(
+        'Paylaşılamadı',
+        error instanceof Error && error.message
+          ? error.message
+          : 'Paylaşım menüsü açılamadı.',
+      );
+    }
+  }, [preview]);
+
   const header = (
     <View style={styles.header}>
       <View style={styles.topRow}>
@@ -101,6 +127,13 @@ export default function HomeScreen() {
           loading={picking}
           icon={<Images size={19} color={Colors.ink} strokeWidth={2} />}
           onPress={pickPhoto}
+        />
+        <ActionButton
+          label="WhatsApp’a aktar"
+          variant="secondary"
+          icon={<Send size={19} color={Colors.ink} strokeWidth={2} />}
+          onPress={() => router.push('/export')}
+          accessibilityHint="Seçtiğin sticker'lardan WhatsApp sticker paketi oluşturur"
         />
       </View>
 
@@ -182,6 +215,27 @@ export default function HomeScreen() {
                 {preview.width} × {preview.height} px · Şeffaf PNG
               </Text>
             ) : null}
+
+            <ActionButton
+              label="Paylaş"
+              variant="secondary"
+              icon={<Share2 size={17} color={Colors.ink} strokeWidth={2} />}
+              onPress={sharePreview}
+              accessibilityHint="Sticker'ı diğer uygulamalara şeffaf PNG olarak gönderir"
+            />
+            <ActionButton
+              label="WhatsApp paketine ekle"
+              variant="secondary"
+              icon={<Send size={17} color={Colors.ink} strokeWidth={2} />}
+              onPress={() => {
+                setPreview(null);
+                router.push('/export');
+              }}
+            />
+            <Text style={styles.previewHint}>
+              Instagram, TikTok ve diğer uygulamalar sticker paketi içe aktarmayı
+              desteklemez; “Paylaş” ile şeffaf PNG olarak gönderebilirsin.
+            </Text>
 
             <ActionButton
               label="Sticker'ı sil"
@@ -453,5 +507,13 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: Colors.inkFaint,
     textAlign: 'center',
+  },
+  previewHint: {
+    fontFamily: Fonts.sans,
+    fontSize: 11,
+    lineHeight: 16,
+    color: Colors.inkFaint,
+    textAlign: 'center',
+    marginTop: -Spacing.one,
   },
 });
