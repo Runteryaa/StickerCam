@@ -1,38 +1,41 @@
 import { Directory, File, Paths } from 'expo-file-system';
 import {
   AlphaType,
-  BlendMode,
-  ClipOp,
   ColorType,
   FilterMode,
   ImageFormat,
   MipmapMode,
   Skia,
-  TileMode,
   type SkImage,
 } from '@shopify/react-native-skia';
 
 import { loadSkiaImage } from '@/services/skiaImageLoader';
+import {
+  isNativeSmartCutoutAvailable,
+  segmentSmartCutout,
+} from '@/services/smartCutoutService';
 import type { Point } from '@/utils/geometry';
 
 /**
- * Nesne seçimi (segmentasyon) servis katmanı.
+ * Akıllı nesne seçimi servisi.
  *
- * Varsayılan olarak cihaz üzerinde çalışan renk/bağlantı tabanlı bir sağlayıcı
- * kullanılır; gerçek bir ML modeli veya uzak API bağlanmak istendiğinde aynı
- * sözleşmeyle yeni bir sağlayıcı eklenir.
+ * Sağlayıcılar görselin tamamıyla aynı boyutta bir **maske** üretir; maskeyi
+ * görsele uygulamak `stickerImage.applyMask` işidir. Böylece aynı maske hem
+ * canlı önizlemede hem kesimde kullanılabilir.
  */
-export type SegmentationRequest = {
+export type SmartSelectionRequest = {
   imageUri: string;
-  /** Editörde zaten yüklü olan görsel; yerel sağlayıcılar tekrar okumaz. */
+  /** Editörde zaten yüklü olan görsel; sağlayıcılar tekrar okumaz. */
   image?: SkImage;
-  /** Dokunulan nokta, görselin piksel koordinatında. */
-  point: Point;
   imageSize: { width: number; height: number };
+  /** Görsel piksel koordinatında, seçilmek istenen bölgeler. */
+  positive: Point[];
+  /** Görsel piksel koordinatında, seçimden çıkarılacak bölgeler. */
+  negative: Point[];
 };
 
-export type SegmentationResult = {
-  /** Şeffaf PNG dosyasının yerel uri'si. */
+export type SmartMaskResult = {
+  /** Beyaz + alfa taşıyan maske PNG'sinin yerel uri'si. */
   uri: string;
   width: number;
   height: number;
@@ -41,9 +44,8 @@ export type SegmentationResult = {
 
 export type SegmentationProvider = {
   id: string;
-  label: string;
   isAvailable: () => boolean;
-  segment: (request: SegmentationRequest) => Promise<SegmentationResult>;
+  segment: (request: SmartSelectionRequest) => Promise<SmartMaskResult>;
 };
 
 export class SegmentationError extends Error {
@@ -56,8 +58,6 @@ export class SegmentationError extends Error {
   }
 }
 
-const REQUEST_TIMEOUT_MS = 20_000;
-
 function getDraftDirectory(): Directory {
   const directory = new Directory(Paths.cache, 'ai-drafts');
   if (!directory.exists) {
@@ -68,151 +68,50 @@ function getDraftDirectory(): Directory {
 
 async function writeDraftBytes(bytes: Uint8Array): Promise<File> {
   const directory = getDraftDirectory();
-  const file = new File(directory, `ai-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`);
+  const file = new File(
+    directory,
+    `mask-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`,
+  );
   file.create({ overwrite: true, intermediates: true });
   await file.write(bytes);
   return file;
 }
 
 /**
- * Uzak segmentasyon API'si. `EXPO_PUBLIC_SEGMENTATION_URL` tanımlıysa etkindir.
- * Sözleşme: multipart/form-data (image, x, y, width, height) -> image/png
+ * Cihaz üzerindeki MediaPipe (MagicTouch) sağlayıcısı.
+ *
+ * Model uygulamanın içinde geldiği için internet gerekmez; dokunulan noktanın
+ * etrafındaki nesneyi gerçek bir sinir ağıyla bulur.
  */
-export const httpSegmentationProvider: SegmentationProvider = {
-  id: 'http',
-  label: 'Uzak AI servisi',
-  isAvailable: () => Boolean(process.env.EXPO_PUBLIC_SEGMENTATION_URL),
+export const nativeSmartProvider: SegmentationProvider = {
+  id: 'mediapipe',
+  isAvailable: isNativeSmartCutoutAvailable,
   async segment(request) {
-    const endpoint = process.env.EXPO_PUBLIC_SEGMENTATION_URL;
-    if (!endpoint) {
-      throw new SegmentationError('Segmentasyon servisi tanımlı değil.', 'unavailable');
+    if (request.positive.length === 0) {
+      throw new SegmentationError('Seçim için nesneye dokun.', 'failed');
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    try {
-      const form = new FormData();
-      form.append('image', {
-        uri: request.imageUri,
-        name: 'photo.jpg',
-        type: 'image/jpeg',
-      } as unknown as Blob);
-      form.append('x', String(Math.round(request.point.x)));
-      form.append('y', String(Math.round(request.point.y)));
-      form.append('width', String(request.imageSize.width));
-      form.append('height', String(request.imageSize.height));
-
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        body: form,
-        headers: { Accept: 'image/png' },
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        throw new SegmentationError(`Segmentasyon servisi ${response.status} döndü.`, 'failed');
-      }
-
-      const buffer = await response.arrayBuffer();
-      if (buffer.byteLength === 0) {
-        throw new SegmentationError('Segmentasyon servisi boş yanıt döndü.', 'failed');
-      }
-
-      const file = await writeDraftBytes(new Uint8Array(buffer));
-      const image = await loadSkiaImage(file.uri);
-
-      return {
-        uri: file.uri,
-        width: image.width(),
-        height: image.height(),
-        provider: 'http',
-      };
-    } catch (error) {
-      if (error instanceof SegmentationError) {
-        throw error;
-      }
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new SegmentationError('Segmentasyon isteği zaman aşımına uğradı.', 'failed');
-      }
-      throw new SegmentationError('Segmentasyon isteği başarısız oldu.', 'failed');
-    } finally {
-      clearTimeout(timeout);
-    }
-  },
-};
-
-/**
- * Geliştirme sırasında akışı denemek için yerel "sahte" sağlayıcı.
- * Gerçek bir model değildir; dokunulan noktanın etrafında elips şeklinde bir
- * kesim üretir. `EXPO_PUBLIC_SEGMENTATION_DEMO=1` ile etkinleşir.
- */
-export const demoLocalSegmentationProvider: SegmentationProvider = {
-  id: 'demo-local',
-  label: 'Yerel demo kesim',
-  isAvailable: () => process.env.EXPO_PUBLIC_SEGMENTATION_DEMO === '1',
-  async segment(request) {
-    const image = request.image ?? (await loadSkiaImage(request.imageUri));
-    const radius = Math.max(24, Math.min(image.width(), image.height()) * 0.24);
-    const size = Math.round(radius * 2);
-    const surface = Skia.Surface.Make(size, size);
-    if (!surface) {
-      throw new SegmentationError('Kesim yüzeyi oluşturulamadı.', 'failed');
-    }
-
-    const canvas = surface.getCanvas();
-    canvas.clear(Skia.Color('transparent'));
-
-    const circle = Skia.Path.Circle(size / 2, size / 2, radius);
-
-    canvas.save();
-    canvas.clipPath(circle, ClipOp.Intersect, true);
-    const paint = Skia.Paint();
-    paint.setAntiAlias(true);
-    canvas.drawImageRect(
-      image,
-      Skia.XYWHRect(0, 0, image.width(), image.height()),
-      Skia.XYWHRect(
-        size / 2 - request.point.x,
-        size / 2 - request.point.y,
-        image.width(),
-        image.height(),
-      ),
-      paint,
-    );
-    canvas.restore();
-    surface.flush();
-
-    const cutout = surface.makeImageSnapshot();
-    const file = await writeDraftBytes(
-      new Uint8Array(cutout.encodeToBytes(ImageFormat.PNG, 100)),
+    const result = await segmentSmartCutout(
+      request.imageSize,
+      request.positive,
+      request.negative,
     );
 
     return {
-      uri: file.uri,
-      width: cutout.width(),
-      height: cutout.height(),
-      provider: 'demo-local',
+      uri: result.uri,
+      width: result.width,
+      height: result.height,
+      provider: 'mediapipe',
     };
   },
 };
 
 /**
- * Cihaz üzerinde çalışan deneysel otomatik kesim.
- *
- * Ağır bir ML modeli yerine, dokunulan noktadan başlayıp benzer renkli
- * bağlantılı bölgeyi seçer. Düz/az desenli zeminlerde pratik sonuç verir;
- * karmaşık fotoğraflarda serbest çizim daha güvenilirdir.
- */
-/**
- * Maske bu çözünürlükte hesaplanır. Küçük değerler hızlıdır ama büyütüldüğünde
- * kenarlar merdiven gibi görünür; 1024 dengeli bir nokta.
+ * Maske bu çözünürlükte hesaplanır. Yedek algoritmanın hız/doğruluk dengesi.
  */
 const LOCAL_MASK_MAX_DIMENSION = 1024;
-const LOCAL_COLOR_TOLERANCE = 52;
+const LOCAL_COLOR_TOLERANCE = 46;
 const LOCAL_MIN_REGION_PIXELS = 32;
-/** Maskeyi tam çözünürlüğe büyütürken kenarları yumuşatan blur üst sınırı. */
-const LOCAL_EDGE_BLUR_MAX = 2.5;
 
 type RegionMask = {
   mask: Uint8Array;
@@ -220,6 +119,7 @@ type RegionMask = {
   borderCoverage: number;
 };
 
+/** Dokunulan noktadan başlayıp benzer renkli bağlantılı bölgeyi seçer. */
 function buildRegionMask(
   pixels: Uint8Array,
   width: number,
@@ -291,8 +191,6 @@ function buildRegionMask(
     }
   }
 
-  // Seçim arka plana taşarsa kullanıcıyı uyar. Arka plan seçildiğinde
-  // görselin kenar piksellerinin büyük kısmı da seçilmiş olur.
   fillSmallHoles(selected, width, height, count);
 
   let borderTotal = 0;
@@ -469,11 +367,20 @@ function makeMaskThumbnail(image: SkImage): {
   };
 }
 
-export const localRegionSegmentationProvider: SegmentationProvider = {
+/**
+ * Yedek sağlayıcı: MediaPipe'ın kullanılamadığı durumlarda (iOS, model
+ * yüklenemezse) dokunulan noktadan başlayan renk/bağlantı tabanlı seçim.
+ * Düz zeminlerde iyi, karmaşık fotoğraflarda sınırlı çalışır.
+ */
+export const localRegionProvider: SegmentationProvider = {
   id: 'local-region',
-  label: 'Yerel otomatik kesim',
   isAvailable: () => true,
   async segment(request) {
+    const first = request.positive[0];
+    if (!first) {
+      throw new SegmentationError('Seçim için nesneye dokun.', 'failed');
+    }
+
     // Yoğun piksel işlemi başlamadan önce "çalışıyor" katmanının çizilmesine
     // fırsat ver.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -497,10 +404,36 @@ export const localRegionSegmentationProvider: SegmentationProvider = {
       throw new SegmentationError('Görsel pikselleri okunamadı.', 'failed');
     }
 
-    const region = buildRegionMask(pixels, thumbnail.width, thumbnail.height, {
-      x: request.point.x * thumbnail.scale,
-      y: request.point.y * thumbnail.scale,
+    const toThumbPoint = (point: Point) => ({
+      x: point.x * thumbnail.scale,
+      y: point.y * thumbnail.scale,
     });
+
+    const region = buildRegionMask(
+      pixels,
+      thumbnail.width,
+      thumbnail.height,
+      toThumbPoint(first),
+    );
+
+    // Negatif dokunuşlar aynı mantıkla seçimden çıkarılır.
+    for (const point of request.negative) {
+      try {
+        const excluded = buildRegionMask(
+          pixels,
+          thumbnail.width,
+          thumbnail.height,
+          toThumbPoint(point),
+        );
+        for (let index = 0; index < excluded.mask.length; index += 1) {
+          if (excluded.mask[index]) {
+            region.mask[index] = 0;
+          }
+        }
+      } catch {
+        // Negatif nokta boşluğa denk geldiyse yok say.
+      }
+    }
 
     if (region.count < LOCAL_MIN_REGION_PIXELS) {
       throw new SegmentationError(
@@ -509,7 +442,10 @@ export const localRegionSegmentationProvider: SegmentationProvider = {
       );
     }
 
-    if (region.borderCoverage > 0.55 && region.count / (thumbnail.width * thumbnail.height) > 0.18) {
+    if (
+      region.borderCoverage > 0.55 &&
+      region.count / (thumbnail.width * thumbnail.height) > 0.18
+    ) {
       throw new SegmentationError(
         'Arka plan seçilmiş görünüyor. Kesmek istediğin nesnenin üzerine dokun.',
         'failed',
@@ -519,32 +455,17 @@ export const localRegionSegmentationProvider: SegmentationProvider = {
     const mask = makeMaskImage(region.mask, thumbnail.width, thumbnail.height);
     const width = image.width();
     const height = image.height();
+
+    // Maskeyi tam çözünürlüğe büyütüyoruz; kenarlar çift doğrusal örnekleme
+    // sayesinde merdiven görünmüyor.
     const surface = Skia.Surface.Make(width, height);
-
     if (!surface) {
-      throw new SegmentationError('Kesim yüzeyi oluşturulamadı.', 'failed');
+      throw new SegmentationError('Kesim maskesi oluşturulamadı.', 'failed');
     }
-
     const canvas = surface.getCanvas();
-    const paint = Skia.Paint();
-    paint.setAntiAlias(true);
-    canvas.drawImageRect(
-      image,
-      Skia.XYWHRect(0, 0, width, height),
-      Skia.XYWHRect(0, 0, width, height),
-      paint,
-    );
-
-    // Maske küçük çözünürlükte üretildiği için büyütülünce kenarları keskin
-    // kareler halinde kalıyor. Ölçekle orantılı küçük bir blur, kesim kenarını
-    // yumuşatıp gerçek bir anti-aliasing etkisi veriyor.
-    const maskScale = Math.max(width / thumbnail.width, height / thumbnail.height);
-    const edgeBlur = Math.min(LOCAL_EDGE_BLUR_MAX, Math.max(0.6, maskScale * 0.55));
-
+    canvas.clear(Skia.Color('transparent'));
     const maskPaint = Skia.Paint();
     maskPaint.setAntiAlias(true);
-    maskPaint.setBlendMode(BlendMode.DstIn);
-    maskPaint.setImageFilter(Skia.ImageFilter.MakeBlur(edgeBlur, edgeBlur, TileMode.Decal));
     canvas.drawImageRectOptions(
       mask,
       Skia.XYWHRect(0, 0, thumbnail.width, thumbnail.height),
@@ -555,35 +476,31 @@ export const localRegionSegmentationProvider: SegmentationProvider = {
     );
     surface.flush();
 
-    const cutout = surface.makeImageSnapshot();
+    const fullMask = surface.makeImageSnapshot();
     const file = await writeDraftBytes(
-      new Uint8Array(cutout.encodeToBytes(ImageFormat.PNG, 100)),
+      new Uint8Array(fullMask.encodeToBytes(ImageFormat.PNG, 100)),
     );
 
     return {
       uri: file.uri,
-      width: cutout.width(),
-      height: cutout.height(),
+      width,
+      height,
       provider: 'local-region',
     };
   },
 };
 
-/**
- * Kullanılabilir sağlayıcıları sırayla dener.
- */
-export async function segmentImage(
-  request: SegmentationRequest,
-): Promise<SegmentationResult> {
-  const providers = [
-    httpSegmentationProvider,
-    localRegionSegmentationProvider,
-    demoLocalSegmentationProvider,
-  ].filter((provider) => provider.isAvailable());
+/** Kullanılabilir sağlayıcıları sırayla dener. */
+export async function segmentMask(
+  request: SmartSelectionRequest,
+): Promise<SmartMaskResult> {
+  const providers = [nativeSmartProvider, localRegionProvider].filter((provider) =>
+    provider.isAvailable(),
+  );
 
   if (providers.length === 0) {
     throw new SegmentationError(
-      'Akıllı kesim servisi bağlı değil. Serbest çizim moduna geçip nesnenin etrafını çizebilirsin.',
+      'Akıllı kesim bu cihazda kullanılamıyor. Serbest çizim modunu deneyebilirsin.',
       'unavailable',
     );
   }
@@ -608,9 +525,5 @@ export async function segmentImage(
 }
 
 export function isSmartSelectionAvailable(): boolean {
-  return (
-    httpSegmentationProvider.isAvailable() ||
-    localRegionSegmentationProvider.isAvailable() ||
-    demoLocalSegmentationProvider.isAvailable()
-  );
+  return nativeSmartProvider.isAvailable() || localRegionProvider.isAvailable();
 }

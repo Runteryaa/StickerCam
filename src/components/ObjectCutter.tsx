@@ -21,14 +21,19 @@ import {
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS, useDerivedValue, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ArrowLeft, Check, Crop, Pencil, RotateCcw, Scissors, Sparkles, Wand2 } from 'lucide-react-native';
+import { ArrowLeft, Check, Crop, Eraser, Pencil, Plus, RotateCcw, Scissors, Sparkles, Wand2 } from 'lucide-react-native';
 
 import { ActionButton } from '@/components/ActionButton';
 import { TransparencyPreview } from '@/components/TransparencyPreview';
 import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
 import { useSkiaImage } from '@/hooks/useSkiaImage';
-import { isSmartSelectionAvailable, segmentImage } from '@/services/segmentationService';
+import { isSmartSelectionAvailable, segmentMask } from '@/services/segmentationService';
 import { loadSkiaImage } from '@/services/skiaImageLoader';
+import {
+  closeSmartCutout,
+  isNativeSmartCutoutAvailable,
+  prepareSmartCutout,
+} from '@/services/smartCutoutService';
 import {
   commitSticker,
   discardStaged,
@@ -39,7 +44,12 @@ import {
 } from '@/services/stickerService';
 import { containRect, viewPointToImage, type Point, type Rect } from '@/utils/geometry';
 import { buildLassoPath, buildPolygonPath } from '@/utils/lasso';
-import { cutOutWithPath, finalizeSticker, finalizeStickerAsIs } from '@/utils/stickerImage';
+import {
+  applyMask,
+  cutOutWithPath,
+  finalizeSticker,
+  finalizeStickerAsIs,
+} from '@/utils/stickerImage';
 
 type SelectionMode = 'lasso' | 'quad' | 'ai';
 
@@ -81,6 +91,16 @@ export function ObjectCutter({
 
   const points = useSharedValue<Point[]>([]);
   const lassoPath = useDerivedValue(() => buildLassoPath(points.value));
+
+  // Akıllı seçim: model durumlu olduğu için seçim boyunca açık tutulur.
+  const [smartPreview, setSmartPreview] = useState<SkImage | null>(null);
+  const [smartBrush, setSmartBrush] = useState<'add' | 'remove'>('add');
+  const [smartCounts, setSmartCounts] = useState({ positive: 0, negative: 0 });
+  const [smartPreparing, setSmartPreparing] = useState(false);
+  const smartPositive = useRef<Point[]>([]);
+  const smartNegative = useRef<Point[]>([]);
+  const smartStroke = useSharedValue<Point[]>([]);
+  const smartPath = useDerivedValue(() => buildLassoPath(smartStroke.value));
 
   // Dört köşe seçimi: köşeler görünür alan koordinatında tutulur.
   const quadCorners = useSharedValue<Point[]>([]);
@@ -201,28 +221,64 @@ export function ObjectCutter({
     }
   }, [fit, image, imageSize, mode, openDraft, points, quadCorners, source]);
 
-  const handleSmartTap = useCallback(
-    async (viewX: number, viewY: number) => {
+  /**
+   * Akıllı seçim oturumu: görsel modele bir kez verilir (ağır özellik
+   * çıkarımı), sonraki dokunuşlar yalnızca maske üretir ve hızlıdır.
+   */
+  useEffect(() => {
+    if (mode !== 'ai' || !image || !isNativeSmartCutoutAvailable()) {
+      return;
+    }
+    let cancelled = false;
+
+    const prepare = async () => {
+      setSmartPreparing(true);
+      try {
+        await prepareSmartCutout(imageUri);
+      } catch (error) {
+        console.warn('[StickerCam] Akıllı kesim modeli hazırlanamadı', error);
+      } finally {
+        if (!cancelled) {
+          setSmartPreparing(false);
+        }
+      }
+    };
+
+    void prepare();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [image, imageUri, mode]);
+
+  // Editörden çıkarken modeli ve görseli serbest bırak.
+  useEffect(() => {
+    return () => {
+      void closeSmartCutout();
+    };
+  }, []);
+
+  const runSmartSegmentation = useCallback(
+    async (positive: Point[], negative: Point[]) => {
       if (!image) {
         return;
       }
-      const insidePhoto =
-        viewX >= fit.x &&
-        viewX <= fit.x + fit.width &&
-        viewY >= fit.y &&
-        viewY <= fit.y + fit.height;
-      if (!insidePhoto) {
-        setStatus('Kesmek istediğin nesnenin üzerine dokun.');
-        return;
-      }
-
-      const point = viewPointToImage({ x: viewX, y: viewY }, fit, imageSize);
       setBusy(true);
-      setStatus('Nesne otomatik seçiliyor…');
+      setStatus('Nesne seçiliyor…');
       try {
-        const result = await segmentImage({ imageUri, image, point, imageSize });
-        const cutout = await loadSkiaImage(result.uri);
-        openDraft(finalizeSticker(cutout), 'ai');
+        const maskResult = await segmentMask({
+          imageUri,
+          image,
+          imageSize,
+          positive,
+          negative,
+        });
+        const mask = await loadSkiaImage(maskResult.uri);
+        const cutout = applyMask(image, mask);
+        if (!cutout) {
+          throw new Error('Kesim oluşturulamadı. Başka bir noktayı dene.');
+        }
+        setSmartPreview(cutout);
         setStatus(null);
       } catch (error) {
         setStatus(errorMessage(error));
@@ -230,8 +286,78 @@ export function ObjectCutter({
         setBusy(false);
       }
     },
-    [fit, image, imageSize, imageUri, openDraft],
+    [image, imageSize, imageUri],
   );
+
+  /**
+   * Dokunma veya sürükleme ile gelen vuruşu seçime ekler/çıkarır.
+   *
+   * Noktalar görsel piksel koordinatına çevrilir; böylece maske her zaman
+   * orijinal çözünürlükte üretilir.
+   */
+  const handleSmartStroke = useCallback(
+    (viewPoints: Point[]) => {
+      if (!image || viewPoints.length === 0) {
+        return;
+      }
+
+      if (smartPreparing) {
+        setStatus('Akıllı kesim modeli hazırlanıyor, bir saniye…');
+        return;
+      }
+
+      const insidePhoto = viewPoints.filter(
+        (point) =>
+          point.x >= fit.x &&
+          point.x <= fit.x + fit.width &&
+          point.y >= fit.y &&
+          point.y <= fit.y + fit.height,
+      );
+      if (insidePhoto.length === 0) {
+        setStatus('Kesmek istediğin nesnenin üzerine dokun.');
+        return;
+      }
+
+      if (smartBrush === 'remove' && smartPositive.current.length === 0) {
+        setStatus('Önce seçmek istediğin nesneye dokun.');
+        return;
+      }
+
+      const imagePoints = insidePhoto.map((point) =>
+        viewPointToImage(point, fit, imageSize),
+      );
+
+      if (smartBrush === 'add') {
+        smartPositive.current = smartPositive.current.concat(imagePoints);
+      } else {
+        smartNegative.current = smartNegative.current.concat(imagePoints);
+      }
+
+      setSmartCounts({
+        positive: smartPositive.current.length,
+        negative: smartNegative.current.length,
+      });
+
+      void runSmartSegmentation(smartPositive.current, smartNegative.current);
+    },
+    [fit, image, imageSize, runSmartSegmentation, smartBrush, smartPreparing],
+  );
+
+  const handleSmartReset = useCallback(() => {
+    smartPositive.current = [];
+    smartNegative.current = [];
+    setSmartCounts({ positive: 0, negative: 0 });
+    setSmartPreview(null);
+    setSmartBrush('add');
+    setStatus(null);
+  }, []);
+
+  const handleSmartConfirm = useCallback(() => {
+    if (!smartPreview) {
+      return;
+    }
+    openDraft(finalizeSticker(smartPreview), 'ai');
+  }, [openDraft, smartPreview]);
 
   const panGesture = useMemo(
     () =>
@@ -266,17 +392,40 @@ export function ObjectCutter({
     [busy, points],
   );
 
-  const tapGesture = useMemo(
+  /**
+   * Akıllı seçim jesti: dokunma tek noktalı, sürükleme çok noktalı bir vuruş
+   * üretir. Böylece hem "nesneye dokun" hem "nesnenin üzerinden geçir"
+   * çalışır.
+   */
+  const smartGesture = useMemo(
     () =>
-      Gesture.Tap()
+      Gesture.Pan()
         .enabled(!busy)
-        .maxDistance(14)
-        .onEnd((event, success) => {
-          if (success) {
-            runOnJS(handleSmartTap)(event.x, event.y);
+        .minDistance(0)
+        .maxPointers(1)
+        .onBegin((event) => {
+          smartStroke.value = [{ x: event.x, y: event.y }];
+          runOnJS(setStatus)(null);
+        })
+        .onUpdate((event) => {
+          const current = smartStroke.value;
+          const last = current[current.length - 1];
+          if (last && Math.hypot(event.x - last.x, event.y - last.y) < 3) {
+            return;
+          }
+          if (current.length >= 800) {
+            return;
+          }
+          smartStroke.value = current.concat([{ x: event.x, y: event.y }]);
+        })
+        .onFinalize(() => {
+          const stroke = smartStroke.value;
+          smartStroke.value = [];
+          if (stroke.length > 0) {
+            runOnJS(handleSmartStroke)(stroke);
           }
         }),
-    [busy, handleSmartTap],
+    [busy, handleSmartStroke, smartStroke],
   );
 
   /**
@@ -386,6 +535,12 @@ export function ObjectCutter({
       setStatus(null);
       points.value = [];
       setIsDrawing(false);
+      // Akıllı seçim moduna girerken/çıkarken önceki vuruşlar geçersizdir.
+      smartPositive.current = [];
+      smartNegative.current = [];
+      setSmartCounts({ positive: 0, negative: 0 });
+      setSmartPreview(null);
+      setSmartBrush('add');
       if (next === 'quad') {
         quadCorners.value = makeDefaultCorners(fit);
         setHasSelection(true);
@@ -433,8 +588,8 @@ export function ObjectCutter({
       : mode === 'quad'
         ? 'Köşe tutamaçlarını sürükleyerek dörtgeni nesneye oturt. İçeriden sürükleyince tümü taşınır.'
         : smartSelectionReady
-          ? 'Nesnenin üzerine tek dokunuş yap; benzer renkli bölge otomatik seçilsin.'
-          : 'Akıllı kesim servisi bağlı değil. Çizim modunda etrafını çizebilirsin.';
+          ? 'Nesneye dokun; sonuç hemen görünür. Yanlış kalan yeri “Çıkar” ile işaretle.'
+          : 'Akıllı kesim bu cihazda kullanılamıyor. Serbest çizim modunu deneyebilirsin.';
 
   const directSaveHint =
     hasAlpha
@@ -471,7 +626,7 @@ export function ObjectCutter({
 
       <GestureDetector
         gesture={
-          mode === 'lasso' ? panGesture : mode === 'quad' ? quadGesture : tapGesture
+          mode === 'lasso' ? panGesture : mode === 'quad' ? quadGesture : smartGesture
         }>
         <View
           style={styles.stage}
@@ -482,14 +637,14 @@ export function ObjectCutter({
           {image ? (
             <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
               <SkiaImage
-                image={image}
+                image={mode === 'ai' && smartPreview ? smartPreview : image}
                 x={fit.x}
                 y={fit.y}
                 width={fit.width}
                 height={fit.height}
                 fit="contain"
               />
-              {mode === 'quad' || isDrawing || hasSelection ? (
+              {mode === 'ai' ? null : mode === 'quad' || isDrawing || hasSelection ? (
                 <Group clip={mode === 'quad' ? quadPath : lassoPath} invertClip>
                   <SkiaRect
                     x={0}
@@ -513,6 +668,14 @@ export function ObjectCutter({
                 style="stroke"
                 strokeWidth={2}
                 color={Colors.white}
+                strokeJoin="round"
+                strokeCap="round"
+              />
+              <Path
+                path={smartPath}
+                style="stroke"
+                strokeWidth={4}
+                color={smartBrush === 'add' ? Colors.accent : Colors.danger}
                 strokeJoin="round"
                 strokeCap="round"
               />
@@ -641,21 +804,49 @@ export function ObjectCutter({
               />
             </>
           ) : (
-            <View style={styles.aiHint}>
-              <View style={styles.aiHintIcon}>
-                <Wand2 size={18} color={Colors.accentSoft} strokeWidth={2} />
+            <>
+              <View style={styles.brushRow}>
+                <BrushTab
+                  active={smartBrush === 'add'}
+                  label="Ekle"
+                  icon={<Plus size={14} color={smartBrush === 'add' ? Colors.white : Colors.paper} />}
+                  onPress={() => setSmartBrush('add')}
+                />
+                <BrushTab
+                  active={smartBrush === 'remove'}
+                  label="Çıkar"
+                  icon={<Eraser size={14} color={smartBrush === 'remove' ? Colors.white : Colors.paper} />}
+                  onPress={() => setSmartBrush('remove')}
+                  disabled={smartCounts.positive === 0}
+                />
+                <View style={styles.brushSpacer} />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Akıllı seçimi temizle"
+                  disabled={busy || (smartCounts.positive === 0 && smartCounts.negative === 0)}
+                  onPress={handleSmartReset}
+                  style={({ pressed }) => [
+                    styles.resetButton,
+                    pressed && styles.pressed,
+                    (busy || (smartCounts.positive === 0 && smartCounts.negative === 0)) &&
+                      styles.resetDisabled,
+                  ]}>
+                  <RotateCcw size={18} color={Colors.paper} strokeWidth={2} />
+                </Pressable>
               </View>
-              <View style={styles.aiHintTextBlock}>
-                <Text style={styles.aiHintTitle}>
-                  {smartSelectionReady ? 'Nesneye dokun' : 'Servis bağlı değil'}
-                </Text>
-                <Text style={styles.aiHintBody}>
-                  {smartSelectionReady
-                    ? 'Tek dokunuşla benzer renkli bölge şeffaf PNG olarak kesilir.'
-                    : 'Serbest çizim moduna dönerek nesnenin etrafını çizebilirsin.'}
-                </Text>
-              </View>
-            </View>
+              <ActionButton
+                label={
+                  smartPreparing
+                    ? 'Model yükleniyor…'
+                    : smartPreview
+                      ? 'Sticker yap'
+                      : 'Nesneye dokun'
+                }
+                icon={<Scissors size={18} color={Colors.white} strokeWidth={2} />}
+                onPress={handleSmartConfirm}
+                disabled={!smartPreview || busy || smartPreparing}
+              />
+            </>
           )}
         </View>
       </View>
@@ -728,6 +919,36 @@ function ModeTab({
       style={[styles.segmentTab, active && styles.segmentTabActive]}>
       {icon}
       <Text style={[styles.segmentLabel, active && styles.segmentLabelActive]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function BrushTab({
+  active,
+  label,
+  icon,
+  onPress,
+  disabled = false,
+}: {
+  active: boolean;
+  label: string;
+  icon: ReactNode;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected: active, disabled }}
+      disabled={disabled}
+      onPress={onPress}
+      style={[
+        styles.brushTab,
+        active && styles.brushTabActive,
+        disabled && styles.resetDisabled,
+      ]}>
+      {icon}
+      <Text style={[styles.brushLabel, active && styles.brushLabelActive]}>{label}</Text>
     </Pressable>
   );
 }
@@ -893,6 +1114,37 @@ const styles = StyleSheet.create({
   },
   segmentLabelActive: {
     color: Colors.ink,
+  },
+  brushRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  brushTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 9,
+    paddingHorizontal: 16,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+    borderColor: 'rgba(248, 241, 226, 0.22)',
+  },
+  brushTabActive: {
+    backgroundColor: Colors.accent,
+    borderColor: Colors.accent,
+  },
+  brushLabel: {
+    fontFamily: Fonts.sansMedium,
+    fontSize: 13,
+    color: Colors.paper,
+  },
+  brushLabelActive: {
+    color: Colors.white,
+  },
+  brushSpacer: {
+    flex: 1,
   },
   instruction: {
     fontFamily: Fonts.sans,

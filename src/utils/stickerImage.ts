@@ -65,6 +65,52 @@ export function cutOutWithPath(
 }
 
 /**
+ * Maskeyi görsele uygular: maskenin alfa kanalı, görselin şeffaflığı olur.
+ *
+ * Akıllı kesim maskeleri kenarlarda yumuşak alfa taşıdığı için sonuç doğrudan
+ * kullanılabilir. Maske görselle aynı boyutta olmalıdır.
+ */
+export function applyMask(image: SkImage, mask: SkImage): SkImage | null {
+  const width = image.width();
+  const height = image.height();
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+
+  const surface = Skia.Surface.Make(width, height);
+  if (!surface) {
+    return null;
+  }
+
+  const canvas = surface.getCanvas();
+  canvas.clear(Skia.Color('transparent'));
+
+  const paint = Skia.Paint();
+  paint.setAntiAlias(true);
+  canvas.drawImageRect(
+    image,
+    Skia.XYWHRect(0, 0, width, height),
+    Skia.XYWHRect(0, 0, width, height),
+    paint,
+  );
+
+  const maskPaint = Skia.Paint();
+  maskPaint.setAntiAlias(true);
+  maskPaint.setBlendMode(BlendMode.DstIn);
+  canvas.drawImageRectOptions(
+    mask,
+    Skia.XYWHRect(0, 0, mask.width(), mask.height()),
+    Skia.XYWHRect(0, 0, width, height),
+    FilterMode.Linear,
+    MipmapMode.Linear,
+    maskPaint,
+  );
+  surface.flush();
+
+  return surface.makeImageSnapshot();
+}
+
+/**
  * Görselin tamamen şeffaf kenarlarını kırpar (minX, minY, maxX, maxY).
  * Piksel taraması pahalı olabileceği için büyük görsellerde atlanır.
  */

@@ -1,0 +1,7 @@
+{
+  "name": "smart-cutout",
+  "version": "1.0.0",
+  "private": true,
+  "description": "StickerCam için MediaPipe tabanlı çevrimdışı akıllı nesne seçimi (MagicTouch).",
+  "main": "index.ts"
+}

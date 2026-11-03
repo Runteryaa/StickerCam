@@ -26,12 +26,15 @@ Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanima
   path, seçim dışının karartılması. Tamamen offline.
 - **Dört köşe**: sürüklenebilir dört tutamaçla düz kenarlı kesim. Köşe tutamacı
   nesneye oturtulur; dörtgenin içinden sürükleyince tüm seçim taşınır.
-- **Akıllı seçim**: dokunulan noktayı sağlayıcı arayüzüne gönderen modüler
-  segmentasyon katmanı (`src/services/segmentationService.ts`). Varsayılan olarak
-  cihaz üzerinde çalışan, benzer renkli bağlantılı bölgeyi seçen yerel sağlayıcı
-  etkindir. Maske 1024 px'te hesaplanıp tam çözünürlüğe yumuşatılarak büyütülür,
-  böylece kesim kenarları pikselli görünmez. İsteğe bağlı olarak uzak HTTP servisi
-  veya demo sağlayıcı kullanılabilir.
+- **Akıllı seçim**: cihaz üzerinde çalışan MediaPipe **MagicTouch** modeli
+  (`modules/smart-cutout`). Model APK'nın içinde gelir, internet gerekmez.
+  Nesneye dokunduğunda maske anında görselin üzerinde önizlenir; “Ekle” ile
+  seçimi genişletip “Çıkar” ile yanlış bölgeleri işaretleyebilirsin. Model
+  durumlu çalıştığı için görsel özellikleri bir kez çıkarılır ve her dokunuş
+  ~200 ms'de yeni maske üretir. Maske, güven değerinden gelen yumuşak alfa ile
+  orijinal görsele `DstIn` uygulanır; kenarlar bu yüzden merdiven görünmez.
+  Model yüklenemezse (veya iOS'ta) benzer renkli bağlantılı bölgeyi seçen yerel
+  yedek algoritma devreye girer.
 - **Kesim**: lasso path'i görsel piksel uzayına taşınır, Skia offscreen surface
   üzerinde kırpılır, tamamen şeffaf kenarlar kırpılır (sıkı bbox), beyaz sticker
   konturu dosyaya işlenir ve PNG olarak kaydedilir.
@@ -132,36 +135,26 @@ eklenir. Token yoksa build devam eder, yalnızca OTA adımı atlanır.
 
 ## Akıllı seçim sağlayıcısı
 
-Varsayılan olarak **yerel otomatik kesim** etkindir: dokunulan noktadan başlayıp
-benzer renkli bağlantılı bölgeyi seçer. Tamamen offline çalışır ve Expo Go ile
-uyumludur. Düz veya az desenli zeminlerde iyi sonuç verir; karmaşık fotoğraflarda
-serbest çizim daha güvenilirdir.
+İki sağlayıcı vardır ve sırayla denenir:
 
-İsteğe bağlı uzak servis için `.env` dosyasına:
+1. **`mediapipe`** (Android, birincil): `modules/smart-cutout` altındaki yerel Expo
+   modülü, MediaPipe `tasks-vision` + MagicTouch modeliyle çalışır. Model
+   `modules/smart-cutout/android/src/main/assets/interactive_segmentation.task`
+   içinde APK ile birlikte gelir (yaklaşık 30 MB), internet gerektirmez.
+   Görsel bir kez modele verilir (`prepareAsync`), ardından gelen dokunuş/sürükleme
+   vuruşları hızlıca maske üretir (`segmentAsync`). Model güven maskesi, kenarları
+   yumuşak bir alfa bandına çevrilerek PNG olarak cache'e yazılır.
+2. **`local-region`** (yedek): renk/bağlantı tabanlı flood-fill. iOS'ta ve
+   native modül yüklenemediğinde devreye girer.
 
-```bash
-EXPO_PUBLIC_SEGMENTATION_URL=https://ornek.com/segment
-```
+Yeni bir sağlayıcı eklemek için `src/services/segmentationService.ts` içindeki
+`SegmentationProvider` sözleşmesini uygulayıp listeye eklemek yeterlidir:
+girdi olarak görsel + pozitif/negatif noktalar alır, görselle aynı boyutta bir
+maske PNG'si döndürür.
 
-Sözleşme: `POST multipart/form-data`
-
-| Alan     | Açıklama                              |
-| -------- | ------------------------------------- |
-| `image`  | Fotoğraf (JPEG)                       |
-| `x`, `y` | Dokunulan nokta, görsel pikselinde    |
-| `width`  | Görsel genişliği                      |
-| `height` | Görsel yüksekliği                     |
-
-Yanıt: `image/png` — şeffaf zeminli kesim. Uygulama sonucu tekrar sıkı bbox'a
-kırpıp beyaz konturu ekler.
-
-Servis olmadan akışı denemek için:
-
-```bash
-EXPO_PUBLIC_SEGMENTATION_DEMO=1
-```
-
-Bu, gerçek bir model değildir; dokunulan noktanın çevresinde elips kesim üretir.
+Model dosyası yenilenmek istenirse
+`https://storage.googleapis.com/mediapipe-models/interactive_segmenter_v2/magic_touch/int8/latest/interactive_segmentation.task`
+adresinden indirilip aynı yola konur.
 
 ## Dosya haritası
 
@@ -179,7 +172,10 @@ src/services/whatsappStickerService.ts  512×512 WebP üretimi, paket manifesti,
 src/services/shareService.ts        Sistem paylaşım menüsü
 src/services/photoSession.ts        Kamera/galeri -> editör bellek aktarımı
 src/services/skiaImageLoader.ts     Güvenilir Skia görsel yükleme
-src/services/segmentationService.ts Sağlayıcı arayüzü, yerel/HTTP/demo sağlayıcı
+src/services/smartCutoutService.ts  MediaPipe köprüsü (hazırla / segmentle / kapat)
+src/services/segmentationService.ts Sağlayıcı arayüzü, MediaPipe + yerel yedek
+modules/smart-cutout/               MediaPipe MagicTouch native modülü (Android)
+modules/share-intent/               Android paylaşım hedefi native modülü
 src/utils/geometry.ts               contain-fit ve koordinat dönüşümleri
 src/utils/lasso.ts                  Worklet uyumlu lasso / çokgen path üretimi
 src/utils/stickerImage.ts           Kırpma, sıkı bbox, beyaz kontur
