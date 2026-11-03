@@ -83,10 +83,11 @@ export default function CameraScreen() {
           uri: photo.uri,
           width: photo.width,
           height: photo.height,
+          hasAlpha: false,
         };
       }
 
-      setPendingPhoto({ uri: prepared.uri, source: 'camera' });
+      setPendingPhoto({ uri: prepared.uri, source: 'camera', hasAlpha: prepared.hasAlpha });
       router.push('/editor');
     } catch (error) {
       Alert.alert(

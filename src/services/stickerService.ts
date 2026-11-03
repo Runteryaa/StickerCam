@@ -1,6 +1,6 @@
 import { Directory, File, Paths } from 'expo-file-system';
 
-export type StickerSource = 'camera' | 'library' | 'ai';
+export type StickerSource = 'camera' | 'library' | 'ai' | 'share';
 
 export type StickerRecord = {
   id: string;

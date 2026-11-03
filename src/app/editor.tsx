@@ -15,6 +15,7 @@ export default function EditorScreen() {
 
   const uri = pending?.uri;
   const source = pending?.source ?? 'camera';
+  const hasAlpha = pending?.hasAlpha ?? false;
 
   if (!uri) {
     return (
@@ -35,6 +36,7 @@ export default function EditorScreen() {
       <ObjectCutter
         imageUri={uri}
         source={source}
+        hasAlpha={hasAlpha}
         onClose={() => {
           clearPendingPhoto();
           router.back();

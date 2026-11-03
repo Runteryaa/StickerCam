@@ -48,6 +48,13 @@ Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanima
   bu yüzden paket aktarımı **Expo Go'da çalışmaz**, derlenmiş APK gerekir.
 - **Diğer uygulamalar**: önizlemedeki “Paylaş” aksiyonu sticker'ı şeffaf PNG
   olarak sistem paylaşım menüsüne verir (Instagram, TikTok, mesaj uygulamaları).
+- **Paylaşımdan içe alma**: Android paylaşım menüsünde StickerCam görünür
+  (`ACTION_SEND` / `image/*`). Paylaşılan görsel doğrudan editörde açılır; native
+  taraf `content://` baytlarını cache'e kopyalar (`modules/share-intent`).
+  Paylaşılan görsellerde **kırpma zorunlu değildir**: editördeki “Kırpmadan
+  kaydet” aksiyonu görselin tamamını sticker yapar. PNG/WebP gibi alfa taşıyan
+  kaynaklar yeniden kodlanırken **şeffaflık korunur** (JPEG'e çevrilmez) ve hazır
+  sticker'lara ayrıca beyaz kontur eklenmez.
 - **Görsel dil**: sıcak kağıt tonları, mercan vurgu, serif başlıklar; açık tema.
 
 ## Çalıştırma

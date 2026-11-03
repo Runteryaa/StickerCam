@@ -3,6 +3,8 @@ import {
   BlendMode,
   ClipOp,
   ColorType,
+  FilterMode,
+  MipmapMode,
   Skia,
   type SkImage,
   type SkPath,
@@ -11,6 +13,11 @@ import {
 const ALPHA_THRESHOLD = 8;
 const MAX_TRIM_PIXELS = 8_000_000;
 const MIN_CUTOUT_SIZE = 8;
+
+/** Şeffaflık tespiti için küçültülen örnek görselin en uzun kenarı. */
+const ALPHA_SAMPLE_SIZE = 128;
+/** Bu değerin altındaki alfa "şeffaf" sayılır (yuvarlama hatalarını yutar). */
+const TRANSPARENT_ALPHA_LIMIT = 250;
 
 /**
  * Lasso path'ine göre görseli keser ve yalnızca seçilen bölgeyi içeren,
@@ -181,4 +188,80 @@ export function finalizeSticker(image: SkImage): SkImage {
   const tight = trimmed ?? image;
   const bordered = addStickerBorder(tight);
   return bordered ?? tight;
+}
+
+/**
+ * Görselde yarı saydam/şeffaf piksel var mı?
+ *
+ * Paylaşılan bir PNG zaten hazır bir sticker olabilir; bu durumda kırpmaya
+ * zorlamamak için şeffaflığı tespit ediyoruz. Maliyeti düşürmek için görsel
+ * 128 px'e küçültülüp yalnızca alfa kanalı taranır.
+ */
+export function imageHasTransparency(image: SkImage): boolean {
+  const width = image.width();
+  const height = image.height();
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+
+  const scale = Math.min(1, ALPHA_SAMPLE_SIZE / Math.max(width, height));
+  const sampleWidth = Math.max(1, Math.round(width * scale));
+  const sampleHeight = Math.max(1, Math.round(height * scale));
+  const info = {
+    width: sampleWidth,
+    height: sampleHeight,
+    colorType: ColorType.RGBA_8888,
+    alphaType: AlphaType.Unpremul,
+  } as const;
+
+  let source: SkImage = image;
+  if (scale < 1) {
+    const surface = Skia.Surface.Make(sampleWidth, sampleHeight);
+    if (!surface) {
+      return false;
+    }
+    const canvas = surface.getCanvas();
+    canvas.clear(Skia.Color('transparent'));
+    const paint = Skia.Paint();
+    paint.setAntiAlias(true);
+    canvas.drawImageRectOptions(
+      image,
+      Skia.XYWHRect(0, 0, width, height),
+      Skia.XYWHRect(0, 0, sampleWidth, sampleHeight),
+      FilterMode.Linear,
+      MipmapMode.Linear,
+      paint,
+    );
+    surface.flush();
+    source = surface.makeImageSnapshot();
+  }
+
+  let pixels: Uint8Array | Float32Array | null = null;
+  try {
+    pixels = source.readPixels(0, 0, info);
+  } catch {
+    return false;
+  }
+  if (!pixels) {
+    return false;
+  }
+
+  const isFloat = pixels instanceof Float32Array;
+  for (let index = 3; index < pixels.length; index += 4) {
+    const alpha = isFloat ? pixels[index] * 255 : pixels[index];
+    if (alpha < TRANSPARENT_ALPHA_LIMIT) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Kırpma yapmadan, görselin şeffaflığını ve renklerini koruyarak sticker
+ * üretir. Yalnızca tamamen boş kenarlar kırpılır; beyaz kontur eklenmez, çünkü
+ * paylaşılan görsel zaten kendi konturuna/çerçevesine sahip olabilir.
+ */
+export function finalizeStickerAsIs(image: SkImage): SkImage {
+  const trimmed = trimTransparentEdges(image);
+  return trimmed ?? image;
 }

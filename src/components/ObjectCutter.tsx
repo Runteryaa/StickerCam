@@ -21,7 +21,7 @@ import {
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS, useDerivedValue, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ArrowLeft, Check, Crop, Pencil, RotateCcw, Scissors, Wand2 } from 'lucide-react-native';
+import { ArrowLeft, Check, Crop, Pencil, RotateCcw, Scissors, Sparkles, Wand2 } from 'lucide-react-native';
 
 import { ActionButton } from '@/components/ActionButton';
 import { TransparencyPreview } from '@/components/TransparencyPreview';
@@ -39,13 +39,15 @@ import {
 } from '@/services/stickerService';
 import { containRect, viewPointToImage, type Point, type Rect } from '@/utils/geometry';
 import { buildLassoPath, buildPolygonPath } from '@/utils/lasso';
-import { cutOutWithPath, finalizeSticker } from '@/utils/stickerImage';
+import { cutOutWithPath, finalizeSticker, finalizeStickerAsIs } from '@/utils/stickerImage';
 
 type SelectionMode = 'lasso' | 'quad' | 'ai';
 
 type ObjectCutterProps = {
   imageUri: string;
   source?: StickerSource;
+  /** Görselin şeffaflık içerdiği bilgisi (paylaşılan hazır sticker'larda). */
+  hasAlpha?: boolean;
   onClose: () => void;
   onSaved: (sticker: StickerRecord) => void;
 };
@@ -60,6 +62,7 @@ function errorMessage(error: unknown): string {
 export function ObjectCutter({
   imageUri,
   source = 'camera',
+  hasAlpha = false,
   onClose,
   onSaved,
 }: ObjectCutterProps) {
@@ -138,6 +141,27 @@ export function ObjectCutter({
     stagedRef.current = staged;
     setDraft(staged);
   }, []);
+
+  /**
+   * Kırpma yapmadan kaydetme. Paylaşılan bir görsel zaten sticker olabilir;
+   * bu yüzden seçim zorunlu değil. Şeffaflık ve renkler olduğu gibi korunur.
+   */
+  const handleDirectExtract = useCallback(() => {
+    if (!image) {
+      return;
+    }
+    setBusy(true);
+    setStatus('Sticker hazırlanıyor…');
+    try {
+      openDraft(finalizeStickerAsIs(image), source);
+      setStatus(null);
+    } catch (error) {
+      Alert.alert('Sticker oluşturulamadı', errorMessage(error));
+      setStatus(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [image, openDraft, source]);
 
   const handleManualExtract = useCallback(async () => {
     if (!image) {
@@ -412,9 +436,19 @@ export function ObjectCutter({
           ? 'Nesnenin üzerine tek dokunuş yap; benzer renkli bölge otomatik seçilsin.'
           : 'Akıllı kesim servisi bağlı değil. Çizim modunda etrafını çizebilirsin.';
 
+  const directSaveHint =
+    hasAlpha
+      ? 'Görsel zaten şeffaf; kırpmadan kaydedersen şeffaflığı korunur.'
+      : 'Kırpma zorunlu değil; görselin tamamını sticker olarak kaydedebilirsin.';
+
   const canExtract = Boolean(image) && !busy;
   const hasActiveSelection =
     mode === 'quad' ? fit.width > 0 && fit.height > 0 : hasSelection;
+  /**
+   * Paylaşılan görseller ve şeffaf PNG'ler hazır sticker sayılır: kırpma
+   * zorunlu değil, olduğu gibi kaydedilebilir.
+   */
+  const allowDirectSave = source === 'share' || hasAlpha;
 
   return (
     <View style={styles.root}>
@@ -568,6 +602,20 @@ export function ObjectCutter({
         <Text style={styles.instruction}>{instruction}</Text>
 
         {status && !busy ? <Text style={styles.status}>{status}</Text> : null}
+
+        {allowDirectSave ? (
+          <View style={styles.directSave}>
+            <ActionButton
+              label="Kırpmadan kaydet"
+              variant="secondary"
+              icon={<Sparkles size={18} color={Colors.ink} strokeWidth={2} />}
+              onPress={handleDirectExtract}
+              disabled={!canExtract}
+              accessibilityHint={directSaveHint}
+            />
+            <Text style={styles.directSaveHint}>{directSaveHint}</Text>
+          </View>
+        ) : null}
 
         <View style={styles.actionsRow}>
           {mode !== 'ai' ? (
@@ -862,6 +910,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.three,
+  },
+  directSave: {
+    gap: Spacing.one,
+  },
+  directSaveHint: {
+    fontFamily: Fonts.sans,
+    fontSize: 11,
+    lineHeight: 16,
+    color: 'rgba(248, 241, 226, 0.6)',
   },
   resetButton: {
     width: 52,

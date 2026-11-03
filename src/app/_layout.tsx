@@ -7,12 +7,15 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { Colors } from '@/constants/theme';
+import { useSharedImageIntake } from '@/hooks/useSharedImageIntake';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
   // Splash zaten gizlenmiş olabilir.
 });
 
 export default function RootLayout() {
+  useSharedImageIntake();
+
   useEffect(() => {
     SplashScreen.hideAsync().catch(() => {
       // Geliştirme sırasında splash henüz hazır olmayabilir.

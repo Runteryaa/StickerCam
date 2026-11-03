@@ -1,0 +1,7 @@
+{
+  "name": "share-intent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "StickerCam için Android paylaşım hedefi (ACTION_SEND / image/*).",
+  "main": "index.ts"
+}

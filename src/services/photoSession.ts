@@ -3,6 +3,11 @@ import type { StickerSource } from './stickerService';
 type PendingPhoto = {
   uri: string;
   source: StickerSource;
+  /**
+   * Görselin şeffaflık içerdiği bilgisi. Kırpmaya zorlamamak ve şeffaflığı
+   * bozmadan kaydetmek için kullanılır.
+   */
+  hasAlpha?: boolean;
 };
 
 /**
@@ -13,6 +18,7 @@ type PendingPhoto = {
  * gibi litera percent karakterleri içerdiği için bu, dosyanın bulunamamasına
  * yol açıyor. URI'yi kısa süreliğine burada tutup editör açılınca okuyoruz.
  */
+
 let pendingPhoto: PendingPhoto | null = null;
 
 export function setPendingPhoto(photo: PendingPhoto): void {

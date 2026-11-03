@@ -31,11 +31,18 @@ export function usePhotoPicker() {
 
       const asset = result.assets[0];
       const prepared = await withTimeout(
-        preparePhoto(asset.uri),
+        preparePhoto(asset.uri, {
+          mimeType: asset.mimeType,
+          fileName: asset.fileName,
+        }),
         15_000,
         'Fotoğraf işlenmesi zaman aşımına uğradı. Lütfen tekrar dene.',
       );
-      setPendingPhoto({ uri: prepared.uri, source: 'library' });
+      setPendingPhoto({
+        uri: prepared.uri,
+        source: 'library',
+        hasAlpha: prepared.hasAlpha,
+      });
       router.push('/editor');
     } catch (error) {
       Alert.alert(
