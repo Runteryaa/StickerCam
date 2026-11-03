@@ -53,8 +53,9 @@ class ShareIntentModule : Module() {
     if (coldStartChecked) {
       return
     }
+    val activity = appContext.currentActivity ?: return
     coldStartChecked = true
-    val intent = appContext.currentActivity?.intent ?: return
+    val intent = activity.intent ?: return
     if (isShareIntent(intent)) {
       pendingIntent = intent
     }
