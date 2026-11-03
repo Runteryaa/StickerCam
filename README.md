@@ -24,17 +24,23 @@ Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanima
   normalize edilmesi (`expo-image-manipulator`).
 - **Serbest çizim (lasso)**: parmakla çizilen kapalı seçim, orta nokta yumuşatmalı
   path, seçim dışının karartılması. Tamamen offline.
-- **Dört köşe**: sürüklenebilir dört tutamaçla düz kenarlı kesim. Köşe tutamacı
-  nesneye oturtulur; dörtgenin içinden sürükleyince tüm seçim taşınır.
+- **Çokgen**: sürüklenebilir köşe tutamaçlarıyla düz kenarlı kesim. Köşe sayısı
+  dörtle sınırlı değil: kenara dokununca araya yeni köşe eklenir, köşeye çift
+  dokununca silinir, şeklin içinden sürükleyince tümü taşınır. Köşe sürüklerken
+  ekranın boş yarısında 2,6× büyüteç açılır; böylece kenar hassas yerleştirilir.
 - **Akıllı seçim**: cihaz üzerinde çalışan MediaPipe **MagicTouch** modeli
   (`modules/smart-cutout`). Model APK'nın içinde gelir, internet gerekmez.
   Nesneye dokunduğunda maske anında görselin üzerinde önizlenir; “Ekle” ile
   seçimi genişletip “Çıkar” ile yanlış bölgeleri işaretleyebilirsin. Model
   durumlu çalıştığı için görsel özellikleri bir kez çıkarılır ve her dokunuş
-  ~200 ms'de yeni maske üretir. Maske, güven değerinden gelen yumuşak alfa ile
-  orijinal görsele `DstIn` uygulanır; kenarlar bu yüzden merdiven görünmez.
-  Model yüklenemezse (veya iOS'ta) benzer renkli bağlantılı bölgeyi seçen yerel
-  yedek algoritma devreye girer.
+  ~200 ms'de yeni maske üretir. Her dokunuş ayrı bir vuruş olarak gönderilir;
+  böylece "Ekle" ile işaretlenen uzak bölgeler tek çizgiye dönüşmez. Maske,
+  güven değerinden gelen yumuşak alfa ile orijinal görsele `DstIn` uygulanır;
+  kenarlar bu yüzden merdiven görünmez. Ham maske ayrıca temizlenir: 3×3
+  kapatma (dilate → erode) ince yarıkları kapatır, nesnenin içinde kalan
+  kapalı delikler doldurulur. Model yüklenemezse (veya iOS'ta) benzer renkli
+  bağlantılı bölgeyi seçen yerel yedek algoritma devreye girer; yedek algoritma
+  da tüm pozitif ve negatif vuruşları birleştirir.
 - **Kesim**: lasso path'i görsel piksel uzayına taşınır, Skia offscreen surface
   üzerinde kırpılır, tamamen şeffaf kenarlar kırpılır (sıkı bbox), beyaz sticker
   konturu dosyaya işlenir ve PNG olarak kaydedilir.
@@ -163,7 +169,7 @@ src/app/index.tsx            Sticker tepsisi (ana ekran)
 src/app/camera.tsx           Kamera + izin akışı
 src/app/editor.tsx           Bellekteki bekleyen fotoğrafı ObjectCutter'a köprü
 src/app/export.tsx           WhatsApp paketi oluşturma / sticker seçimi
-src/components/ObjectCutter.tsx     Lasso / dört köşe / akıllı seçim, kesim, önizleme, kaydetme
+src/components/ObjectCutter.tsx     Lasso / çokgen / akıllı seçim, kesim, önizleme, kaydetme
 src/components/ActionButton.tsx     Ortak buton
 src/components/TransparencyPreview.tsx  Damalı zemin önizlemesi
 src/services/imageService.ts        EXIF düzeltme + boyut normalizasyonu

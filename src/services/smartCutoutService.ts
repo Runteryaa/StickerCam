@@ -35,29 +35,38 @@ export async function prepareSmartCutout(uri: string): Promise<SmartCutoutSessio
  * Vuruşlarla maske üretir.
  *
  * Noktalar görsel piksel koordinatındadır; native tarafa 0..1 normalize
- * edilerek gönderilir.
+ * edilerek gönderilir. Her vuruş `-1, -1` ayırıcısıyla ayrılır: model böylece
+ * iki ayrı dokunuşu tek bir fırça çizgisi olarak birleştirmez.
  */
 export async function segmentSmartCutout(
   imageSize: { width: number; height: number },
-  positive: Point[],
-  negative: Point[],
+  positiveStrokes: Point[][],
+  negativeStrokes: Point[][],
 ): Promise<{ uri: string; width: number; height: number }> {
   if (!SmartCutout) {
     throw new Error('Akıllı kesim modülü bu cihazda bulunmuyor.');
   }
 
-  const toFlat = (points: Point[]): number[] => {
+  const toFlat = (strokes: Point[][]): number[] => {
     const flat: number[] = [];
-    for (const point of points) {
-      flat.push(
-        clamp01(point.x / imageSize.width),
-        clamp01(point.y / imageSize.height),
-      );
+    for (const stroke of strokes) {
+      if (stroke.length === 0) {
+        continue;
+      }
+      if (flat.length > 0) {
+        flat.push(-1, -1);
+      }
+      for (const point of stroke) {
+        flat.push(
+          clamp01(point.x / imageSize.width),
+          clamp01(point.y / imageSize.height),
+        );
+      }
     }
     return flat;
   };
 
-  return SmartCutout.segmentAsync(toFlat(positive), toFlat(negative));
+  return SmartCutout.segmentAsync(toFlat(positiveStrokes), toFlat(negativeStrokes));
 }
 
 /** Modeli ve önbellekteki görseli serbest bırakır. */

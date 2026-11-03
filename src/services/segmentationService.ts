@@ -28,10 +28,15 @@ export type SmartSelectionRequest = {
   /** Editörde zaten yüklü olan görsel; sağlayıcılar tekrar okumaz. */
   image?: SkImage;
   imageSize: { width: number; height: number };
-  /** Görsel piksel koordinatında, seçilmek istenen bölgeler. */
-  positive: Point[];
-  /** Görsel piksel koordinatında, seçimden çıkarılacak bölgeler. */
-  negative: Point[];
+  /**
+   * Görsel piksel koordinatında, seçilmek istenen bölgeler.
+   *
+   * Her dizi ayrı bir vuruştur: bir dokunuş tek nokta, sürükleme ise çok
+   * noktalı bir çizgi olur. Model vuruşları karıştırmadan değerlendirir.
+   */
+  positiveStrokes: Point[][];
+  /** Görsel piksel koordinatında, seçimden çıkarılacak vuruşlar. */
+  negativeStrokes: Point[][];
 };
 
 export type SmartMaskResult = {
@@ -40,6 +45,8 @@ export type SmartMaskResult = {
   width: number;
   height: number;
   provider: string;
+  /** Birincil sağlayıcı başarısız olduysa nedeni (teşhis için). */
+  note?: string;
 };
 
 export type SegmentationProvider = {
@@ -87,14 +94,15 @@ export const nativeSmartProvider: SegmentationProvider = {
   id: 'mediapipe',
   isAvailable: isNativeSmartCutoutAvailable,
   async segment(request) {
-    if (request.positive.length === 0) {
+    const hasPositive = request.positiveStrokes.some((stroke) => stroke.length > 0);
+    if (!hasPositive) {
       throw new SegmentationError('Seçim için nesneye dokun.', 'failed');
     }
 
     const result = await segmentSmartCutout(
       request.imageSize,
-      request.positive,
-      request.negative,
+      request.positiveStrokes,
+      request.negativeStrokes,
     );
 
     return {
@@ -112,6 +120,39 @@ export const nativeSmartProvider: SegmentationProvider = {
 const LOCAL_MASK_MAX_DIMENSION = 1024;
 const LOCAL_COLOR_TOLERANCE = 46;
 const LOCAL_MIN_REGION_PIXELS = 32;
+
+/** Yedek algoritmada tek vuruştan en fazla kaç tohum noktası kullanılır. */
+const POSITIVE_SEED_LIMIT = 6;
+const NEGATIVE_SEED_LIMIT = 6;
+/** Toplam tohum sayısı: pahalı flood-fill'i sınırlar. */
+const MAX_POSITIVE_SEEDS = 24;
+
+/** Uzun bir vuruştan eşit aralıklı en fazla `limit` nokta seçer. */
+function sampleStroke(stroke: Point[], limit: number): Point[] {
+  if (stroke.length <= limit) {
+    return stroke;
+  }
+  const picked: Point[] = [];
+  const step = (stroke.length - 1) / (limit - 1);
+  for (let index = 0; index < limit; index += 1) {
+    picked.push(stroke[Math.round(index * step)]);
+  }
+  return picked;
+}
+
+/** Tüm pozitif vuruşlardan tohum noktaları toplar. */
+function collectSeeds(strokes: Point[][]): Point[] {
+  const seeds: Point[] = [];
+  for (const stroke of strokes) {
+    for (const point of sampleStroke(stroke, POSITIVE_SEED_LIMIT)) {
+      if (seeds.length >= MAX_POSITIVE_SEEDS) {
+        return seeds;
+      }
+      seeds.push(point);
+    }
+  }
+  return seeds;
+}
 
 type RegionMask = {
   mask: Uint8Array;
@@ -376,8 +417,8 @@ export const localRegionProvider: SegmentationProvider = {
   id: 'local-region',
   isAvailable: () => true,
   async segment(request) {
-    const first = request.positive[0];
-    if (!first) {
+    const seeds = collectSeeds(request.positiveStrokes);
+    if (seeds.length === 0) {
       throw new SegmentationError('Seçim için nesneye dokun.', 'failed');
     }
 
@@ -409,31 +450,65 @@ export const localRegionProvider: SegmentationProvider = {
       y: point.y * thumbnail.scale,
     });
 
-    const region = buildRegionMask(
-      pixels,
-      thumbnail.width,
-      thumbnail.height,
-      toThumbPoint(first),
-    );
+    const total = thumbnail.width * thumbnail.height;
+    const union = new Uint8Array(total);
+    let count = 0;
+    let borderCoverage = 0;
+    let usedSeeds = 0;
 
-    // Negatif dokunuşlar aynı mantıkla seçimden çıkarılır.
-    for (const point of request.negative) {
+    // Her pozitif vuruş kendi bölgesini üretir ve hepsi birleştirilir.
+    // (Eskiden yalnızca ilk dokunuş kullanılıyordu, bu yüzden "Ekle" hiçbir
+    // şey yapmıyor gibi görünüyordu.)
+    for (const seed of seeds) {
       try {
-        const excluded = buildRegionMask(
+        const part = buildRegionMask(
           pixels,
           thumbnail.width,
           thumbnail.height,
-          toThumbPoint(point),
+          toThumbPoint(seed),
         );
-        for (let index = 0; index < excluded.mask.length; index += 1) {
-          if (excluded.mask[index]) {
-            region.mask[index] = 0;
+        usedSeeds += 1;
+        borderCoverage = Math.max(borderCoverage, part.borderCoverage);
+        for (let index = 0; index < part.mask.length; index += 1) {
+          if (part.mask[index] && !union[index]) {
+            union[index] = 1;
+            count += 1;
           }
         }
       } catch {
-        // Negatif nokta boşluğa denk geldiyse yok say.
+        // Boşluğa denk gelen dokunuşu yok say.
       }
     }
+
+    if (usedSeeds === 0) {
+      throw new SegmentationError(
+        'Bu noktada seçilecek bir nesne bulunamadı. Başka bir yere dokun.',
+        'failed',
+      );
+    }
+
+    // Negatif vuruşlar aynı mantıkla seçimden çıkarılır.
+    for (const stroke of request.negativeStrokes) {
+      for (const point of sampleStroke(stroke, NEGATIVE_SEED_LIMIT)) {
+        try {
+          const excluded = buildRegionMask(
+            pixels,
+            thumbnail.width,
+            thumbnail.height,
+            toThumbPoint(point),
+          );
+          for (let index = 0; index < excluded.mask.length; index += 1) {
+            if (excluded.mask[index]) {
+              union[index] = 0;
+            }
+          }
+        } catch {
+          // Negatif nokta boşluğa denk geldiyse yok say.
+        }
+      }
+    }
+
+    const region = { mask: union, count, borderCoverage };
 
     if (region.count < LOCAL_MIN_REGION_PIXELS) {
       throw new SegmentationError(
@@ -506,11 +581,14 @@ export async function segmentMask(
   }
 
   let lastError: unknown = null;
+  let note: string | undefined;
   for (const provider of providers) {
     try {
-      return await provider.segment(request);
+      const result = await provider.segment(request);
+      return note ? { ...result, note } : result;
     } catch (error) {
       lastError = error;
+      note = error instanceof Error ? error.message : String(error);
       console.warn(`[StickerCam] ${provider.id} segmentasyonu başarısız:`, error);
     }
   }

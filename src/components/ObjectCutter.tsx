@@ -69,6 +69,56 @@ function errorMessage(error: unknown): string {
   return 'Beklenmeyen bir hata oluştu. Tekrar deneyebilirsin.';
 }
 
+/** Vuruşlardaki toplam nokta sayısı. */
+function countPoints(strokes: Point[][]): number {
+  return strokes.reduce((total, stroke) => total + stroke.length, 0);
+}
+
+/** Işın atma yöntemiyle noktanın çokgenin içinde olup olmadığını söyler. */
+function pointInPolygon(points: Point[], x: number, y: number): boolean {
+  'worklet';
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
+    const xi = points[i].x;
+    const yi = points[i].y;
+    const xj = points[j].x;
+    const yj = points[j].y;
+    const crosses = yi > y !== yj > y;
+    if (crosses && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** Noktanın doğru parçasına uzaklığı ve en yakın noktası. */
+function segmentHit(
+  x: number,
+  y: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): { distance: number; x: number; y: number } {
+  'worklet';
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lengthSq = dx * dx + dy * dy;
+  const t = lengthSq > 0 ? Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy) / lengthSq)) : 0;
+  const px = ax + t * dx;
+  const py = ay + t * dy;
+  return { distance: Math.hypot(x - px, y - py), x: px, y: py };
+}
+
+/** Köşe tutamacının dokunma yarıçapı (görünür piksel). */
+const VERTEX_HIT_RADIUS = 40;
+/** Kenara dokunarak köşe ekleme yarıçapı (görünür piksel). */
+const EDGE_HIT_RADIUS = 26;
+/** Bir dokunuşun "sürükleme" sayılması için gereken mesafe. */
+const TAP_SLOP = 9;
+/** Çift dokunuşla köşe silme aralığı. */
+const DOUBLE_TAP_MS = 420;
+
 export function ObjectCutter({
   imageUri,
   source = 'camera',
@@ -97,12 +147,17 @@ export function ObjectCutter({
   const [smartBrush, setSmartBrush] = useState<'add' | 'remove'>('add');
   const [smartCounts, setSmartCounts] = useState({ positive: 0, negative: 0 });
   const [smartPreparing, setSmartPreparing] = useState(false);
-  const smartPositive = useRef<Point[]>([]);
-  const smartNegative = useRef<Point[]>([]);
+  const [smartEngine, setSmartEngine] = useState<'model' | 'fallback' | null>(null);
+  const [smartNote, setSmartNote] = useState<string | null>(null);
+  /** Her dizi ayrı bir vuruş: dokunuş = tek nokta, sürükleme = çizgi. */
+  const smartPositive = useRef<Point[][]>([]);
+  const smartNegative = useRef<Point[][]>([]);
   const smartStroke = useSharedValue<Point[]>([]);
   const smartPath = useDerivedValue(() => buildLassoPath(smartStroke.value));
+  const prepareRef = useRef<Promise<unknown> | null>(null);
+  const lastCornerTap = useRef<{ index: number; time: number } | null>(null);
 
-  // Dört köşe seçimi: köşeler görünür alan koordinatında tutulur.
+  // Çokgen seçimi: köşe sayısı serbest, köşeler görünür alan koordinatında.
   const quadCorners = useSharedValue<Point[]>([]);
   const quadPath = useDerivedValue(() => buildPolygonPath(quadCorners.value));
   const quadHandles = useDerivedValue(() => {
@@ -115,6 +170,48 @@ export function ObjectCutter({
   const dragCorner = useSharedValue(-1);
   const dragStart = useSharedValue<Point>({ x: 0, y: 0 });
   const dragFrom = useSharedValue<Point[]>([]);
+  const dragEnd = useSharedValue<Point>({ x: 0, y: 0 });
+  const dragMoved = useSharedValue(0);
+  /** 0 = yok, 1 = köşe, 2 = tüm şekil, 3 = kenara dokunma (köşe ekle). */
+  const dragKind = useSharedValue(0);
+  const loupeVisible = useSharedValue(false);
+  const loupeCenter = useSharedValue<Point>({ x: 0, y: 0 });
+
+  /**
+   * Büyüteç: sürüklenen köşenin etrafı 2,6× büyütülür. Parmak köşeyi
+   * kapatmasın diye ekranın boş yarısına yerleştirilir.
+   */
+  const loupeLayout = useDerivedValue(() => {
+    const center = loupeCenter.value;
+    const radius = 56;
+    const placeBottom = center.y < stageSize.height * 0.5;
+    return {
+      x: stageSize.width / 2,
+      y: placeBottom ? stageSize.height - radius - 26 : radius + 26,
+      radius,
+    };
+  });
+
+  const loupeClip = useDerivedValue(() => {
+    const layout = loupeLayout.value;
+    const path = Skia.PathBuilder.Make();
+    path.addCircle(layout.x, layout.y, layout.radius);
+    return path.build();
+  });
+
+  const loupeTransform = useDerivedValue(() => {
+    const layout = loupeLayout.value;
+    const center = loupeCenter.value;
+    return [
+      { translateX: layout.x },
+      { translateY: layout.y },
+      { scale: 2.6 },
+      { translateX: -center.x },
+      { translateY: -center.y },
+    ];
+  });
+
+  const loupeOpacity = useDerivedValue(() => (loupeVisible.value ? 1 : 0));
 
   const stagedRef = useRef<StagedSticker | null>(null);
 
@@ -233,9 +330,14 @@ export function ObjectCutter({
 
     const prepare = async () => {
       setSmartPreparing(true);
+      const promise = prepareSmartCutout(imageUri);
+      prepareRef.current = promise;
       try {
-        await prepareSmartCutout(imageUri);
+        await promise;
       } catch (error) {
+        if (!cancelled) {
+          setSmartNote(errorMessage(error));
+        }
         console.warn('[StickerCam] Akıllı kesim modeli hazırlanamadı', error);
       } finally {
         if (!cancelled) {
@@ -248,6 +350,7 @@ export function ObjectCutter({
 
     return () => {
       cancelled = true;
+      prepareRef.current = null;
     };
   }, [image, imageUri, mode]);
 
@@ -259,19 +362,28 @@ export function ObjectCutter({
   }, []);
 
   const runSmartSegmentation = useCallback(
-    async (positive: Point[], negative: Point[]) => {
+    async (positiveStrokes: Point[][], negativeStrokes: Point[][]) => {
       if (!image) {
         return;
       }
       setBusy(true);
       setStatus('Nesne seçiliyor…');
       try {
+        // Model henüz yüklenmediyse dokunuşu kaybetmek yerine bekle.
+        if (isNativeSmartCutoutAvailable() && prepareRef.current) {
+          try {
+            await prepareRef.current;
+          } catch {
+            // Model yüklenemedi; aşağıdaki sağlayıcı zinciri yedeğe düşer.
+          }
+        }
+
         const maskResult = await segmentMask({
           imageUri,
           image,
           imageSize,
-          positive,
-          negative,
+          positiveStrokes,
+          negativeStrokes,
         });
         const mask = await loadSkiaImage(maskResult.uri);
         const cutout = applyMask(image, mask);
@@ -279,6 +391,8 @@ export function ObjectCutter({
           throw new Error('Kesim oluşturulamadı. Başka bir noktayı dene.');
         }
         setSmartPreview(cutout);
+        setSmartEngine(maskResult.provider === 'mediapipe' ? 'model' : 'fallback');
+        setSmartNote(maskResult.note ?? null);
         setStatus(null);
       } catch (error) {
         setStatus(errorMessage(error));
@@ -301,11 +415,6 @@ export function ObjectCutter({
         return;
       }
 
-      if (smartPreparing) {
-        setStatus('Akıllı kesim modeli hazırlanıyor, bir saniye…');
-        return;
-      }
-
       const insidePhoto = viewPoints.filter(
         (point) =>
           point.x >= fit.x &&
@@ -323,24 +432,27 @@ export function ObjectCutter({
         return;
       }
 
-      const imagePoints = insidePhoto.map((point) =>
+      // Görsel piksel koordinatına çevir; maske her zaman orijinal
+      // çözünürlükte üretilir.
+      const stroke = insidePhoto.map((point) =>
         viewPointToImage(point, fit, imageSize),
       );
 
+      // Her dokunuş/sürükleme ayrı bir vuruş olarak saklanır.
       if (smartBrush === 'add') {
-        smartPositive.current = smartPositive.current.concat(imagePoints);
+        smartPositive.current = [...smartPositive.current, stroke];
       } else {
-        smartNegative.current = smartNegative.current.concat(imagePoints);
+        smartNegative.current = [...smartNegative.current, stroke];
       }
 
       setSmartCounts({
-        positive: smartPositive.current.length,
-        negative: smartNegative.current.length,
+        positive: countPoints(smartPositive.current),
+        negative: countPoints(smartNegative.current),
       });
 
       void runSmartSegmentation(smartPositive.current, smartNegative.current);
     },
-    [fit, image, imageSize, runSmartSegmentation, smartBrush, smartPreparing],
+    [fit, image, imageSize, runSmartSegmentation, smartBrush],
   );
 
   const handleSmartReset = useCallback(() => {
@@ -349,6 +461,8 @@ export function ObjectCutter({
     setSmartCounts({ positive: 0, negative: 0 });
     setSmartPreview(null);
     setSmartBrush('add');
+    setSmartEngine(null);
+    setSmartNote(null);
     setStatus(null);
   }, []);
 
@@ -429,8 +543,81 @@ export function ObjectCutter({
   );
 
   /**
-   * Dört köşe seçimi: bir köşeye yakın başlarsan o köşeyi, boş alandan
-   * başlarsan tüm dörtgeni sürükler.
+   * Kenara dokununca araya yeni bir köşe ekler; çokgenin şekli bozulmaz,
+   * kullanıcı yeni tutamacı istediği yere sürükler.
+   */
+  const insertCornerAt = useCallback(
+    (x: number, y: number) => {
+      const corners = quadCorners.value;
+      if (corners.length < 3) {
+        return;
+      }
+
+      let bestIndex = -1;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      let bestPoint: Point | null = null;
+
+      for (let index = 0; index < corners.length; index += 1) {
+        const a = corners[index];
+        const b = corners[(index + 1) % corners.length];
+        const hit = segmentHit(x, y, a.x, a.y, b.x, b.y);
+        if (hit.distance < bestDistance) {
+          bestDistance = hit.distance;
+          bestIndex = index;
+          bestPoint = { x: hit.x, y: hit.y };
+        }
+      }
+
+      if (bestIndex < 0 || !bestPoint || bestDistance > EDGE_HIT_RADIUS) {
+        return;
+      }
+
+      const next = corners.slice();
+      next.splice(bestIndex + 1, 0, bestPoint);
+      quadCorners.value = next;
+      setHasSelection(true);
+      setStatus('Köşe eklendi. Sürükleyerek yerleştir.');
+    },
+    [quadCorners],
+  );
+
+  /** Köşeyi siler (en az üç köşe kalmalı). */
+  const removeCorner = useCallback(
+    (index: number) => {
+      const corners = quadCorners.value;
+      if (corners.length <= 3) {
+        setStatus('En az üç köşe gerekli.');
+        return;
+      }
+      const next = corners.filter((_, position) => position !== index);
+      quadCorners.value = next;
+      setHasSelection(true);
+      setStatus('Köşe silindi.');
+    },
+    [quadCorners],
+  );
+
+  /** Köşeye çift dokunuşu algılar; ikinci dokunuşta köşeyi siler. */
+  const handleCornerTap = useCallback(
+    (index: number) => {
+      const now = Date.now();
+      const last = lastCornerTap.current;
+      if (last && last.index === index && now - last.time < DOUBLE_TAP_MS) {
+        lastCornerTap.current = null;
+        removeCorner(index);
+        return;
+      }
+      lastCornerTap.current = { index, time: now };
+    },
+    [removeCorner],
+  );
+
+  /**
+   * Çokgen seçimi:
+   *  - köşe tutamacını sürükle → yalnızca o köşe taşınır (büyüteç açılır),
+   *  - şeklin içinden sürükle → tüm çokgen taşınır,
+   *  - kenara dokun → araya köşe eklenir,
+   *  - köşeye çift dokun → köşe silinir.
    */
   const quadGesture = useMemo(
     () =>
@@ -440,9 +627,19 @@ export function ObjectCutter({
         .maxPointers(1)
         .onBegin((event) => {
           const corners = quadCorners.value;
-          if (corners.length !== 4) {
+          dragFrom.value = corners;
+          dragStart.value = { x: event.x, y: event.y };
+          dragEnd.value = { x: event.x, y: event.y };
+          dragMoved.value = 0;
+          dragCorner.value = -1;
+          dragKind.value = 0;
+          loupeVisible.value = false;
+          runOnJS(setStatus)(null);
+
+          if (corners.length < 3) {
             return;
           }
+
           let nearest = -1;
           let nearestDistance = Number.POSITIVE_INFINITY;
           for (let index = 0; index < corners.length; index += 1) {
@@ -455,14 +652,46 @@ export function ObjectCutter({
               nearest = index;
             }
           }
-          dragCorner.value = nearestDistance <= 64 ? nearest : -1;
-          dragStart.value = { x: event.x, y: event.y };
-          dragFrom.value = corners;
-          runOnJS(setStatus)(null);
+
+          if (nearestDistance <= VERTEX_HIT_RADIUS) {
+            dragKind.value = 1;
+            dragCorner.value = nearest;
+            loupeCenter.value = corners[nearest];
+            loupeVisible.value = true;
+            return;
+          }
+
+          let edgeDistance = Number.POSITIVE_INFINITY;
+          for (let index = 0; index < corners.length; index += 1) {
+            const a = corners[index];
+            const b = corners[(index + 1) % corners.length];
+            const hit = segmentHit(event.x, event.y, a.x, a.y, b.x, b.y);
+            if (hit.distance < edgeDistance) {
+              edgeDistance = hit.distance;
+            }
+          }
+          if (edgeDistance <= EDGE_HIT_RADIUS) {
+            dragKind.value = 3;
+            return;
+          }
+
+          if (pointInPolygon(corners, event.x, event.y)) {
+            dragKind.value = 2;
+          }
         })
         .onUpdate((event) => {
           const from = dragFrom.value;
-          if (from.length !== 4) {
+          dragEnd.value = { x: event.x, y: event.y };
+
+          const moved = Math.hypot(
+            event.x - dragStart.value.x,
+            event.y - dragStart.value.y,
+          );
+          if (moved > dragMoved.value) {
+            dragMoved.value = moved;
+          }
+
+          if (from.length < 3) {
             return;
           }
 
@@ -471,7 +700,7 @@ export function ObjectCutter({
           const right = fit.x + fit.width;
           const bottom = fit.y + fit.height;
 
-          if (dragCorner.value >= 0) {
+          if (dragKind.value === 1 && dragCorner.value >= 0) {
             const index = dragCorner.value;
             const next = from.slice();
             next[index] = {
@@ -479,6 +708,11 @@ export function ObjectCutter({
               y: Math.min(Math.max(event.y, top), bottom),
             };
             quadCorners.value = next;
+            loupeCenter.value = next[index];
+            return;
+          }
+
+          if (dragKind.value !== 2) {
             return;
           }
 
@@ -508,10 +742,34 @@ export function ObjectCutter({
           }));
         })
         .onFinalize(() => {
+          const kind = dragKind.value;
+          const index = dragCorner.value;
+          if (kind === 3 && dragMoved.value < TAP_SLOP) {
+            runOnJS(insertCornerAt)(dragEnd.value.x, dragEnd.value.y);
+          } else if (kind === 1 && index >= 0 && dragMoved.value < TAP_SLOP) {
+            runOnJS(handleCornerTap)(index);
+          }
+
+          dragKind.value = 0;
           dragCorner.value = -1;
+          loupeVisible.value = false;
           runOnJS(setHasSelection)(true);
         }),
-    [busy, dragCorner, dragFrom, dragStart, fit, quadCorners],
+    [
+      busy,
+      dragCorner,
+      dragEnd,
+      dragFrom,
+      dragKind,
+      dragMoved,
+      dragStart,
+      fit,
+      handleCornerTap,
+      insertCornerAt,
+      loupeCenter,
+      loupeVisible,
+      quadCorners,
+    ],
   );
 
   const handleReset = useCallback(() => {
@@ -541,6 +799,9 @@ export function ObjectCutter({
       setSmartCounts({ positive: 0, negative: 0 });
       setSmartPreview(null);
       setSmartBrush('add');
+      setSmartEngine(null);
+      setSmartNote(null);
+      lastCornerTap.current = null;
       if (next === 'quad') {
         quadCorners.value = makeDefaultCorners(fit);
         setHasSelection(true);
@@ -586,7 +847,7 @@ export function ObjectCutter({
     mode === 'lasso'
       ? 'Parmağını nesnenin çevresinde gezdir; çizgi kendiliğinden kapanır.'
       : mode === 'quad'
-        ? 'Köşe tutamaçlarını sürükleyerek dörtgeni nesneye oturt. İçeriden sürükleyince tümü taşınır.'
+        ? 'Köşeyi sürükle (büyüteç açılır), kenara dokun → yeni köşe, köşeye çift dokun → sil.'
         : smartSelectionReady
           ? 'Nesneye dokun; sonuç hemen görünür. Yanlış kalan yeri “Çıkar” ile işaretle.'
           : 'Akıllı kesim bu cihazda kullanılamıyor. Serbest çizim modunu deneyebilirsin.';
@@ -702,6 +963,44 @@ export function ObjectCutter({
                     strokeWidth={2.5}
                     color={Colors.accent}
                   />
+                  <Group opacity={loupeOpacity}>
+                    <Group clip={loupeClip}>
+                      <Group transform={loupeTransform}>
+                        <SkiaImage
+                          image={image}
+                          x={fit.x}
+                          y={fit.y}
+                          width={fit.width}
+                          height={fit.height}
+                          fit="contain"
+                        />
+                        <Path
+                          path={quadPath}
+                          style="stroke"
+                          strokeWidth={1.5}
+                          color={Colors.white}
+                          strokeJoin="round"
+                        />
+                        <Path
+                          path={quadHandles}
+                          style="fill"
+                          color={Colors.accent}
+                        />
+                      </Group>
+                    </Group>
+                    <Path
+                      path={loupeClip}
+                      style="stroke"
+                      strokeWidth={3}
+                      color={Colors.paper}
+                    />
+                    <Path
+                      path={loupeClip}
+                      style="stroke"
+                      strokeWidth={1}
+                      color={Colors.accent}
+                    />
+                  </Group>
                 </>
               ) : null}
             </Canvas>
@@ -738,7 +1037,7 @@ export function ObjectCutter({
               {mode === 'lasso'
                 ? 'SERBEST ÇİZİM'
                 : mode === 'quad'
-                  ? 'DÖRT KÖŞE'
+                  ? 'ÇOKGEN'
                   : 'AKILLI SEÇİM'}
             </Text>
           </View>
@@ -778,6 +1077,18 @@ export function ObjectCutter({
 
         <Text style={styles.instruction}>{instruction}</Text>
 
+        {mode === 'ai' ? (
+          <Text style={styles.engine}>
+            {smartPreparing
+              ? 'Akıllı model hazırlanıyor…'
+              : smartEngine === 'model'
+                ? 'MagicTouch modeli · çevrimdışı'
+                : smartEngine === 'fallback'
+                  ? `Yedek algoritma${smartNote ? ` · ${smartNote}` : ''}`
+                  : 'Dokunmaya hazır'}
+          </Text>
+        ) : null}
+
         {status && !busy ? <Text style={styles.status}>{status}</Text> : null}
 
         {allowDirectSave ? (
@@ -794,75 +1105,67 @@ export function ObjectCutter({
           </View>
         ) : null}
 
-        <View style={styles.actionsRow}>
-          {mode !== 'ai' ? (
-            <>
+        {mode === 'ai' ? (
+          <View style={styles.aiActions}>
+            <View style={styles.brushRow}>
+              <BrushTab
+                active={smartBrush === 'add'}
+                label="Ekle"
+                icon={<Plus size={14} color={smartBrush === 'add' ? Colors.white : Colors.paper} />}
+                onPress={() => setSmartBrush('add')}
+              />
+              <BrushTab
+                active={smartBrush === 'remove'}
+                label="Çıkar"
+                icon={<Eraser size={14} color={smartBrush === 'remove' ? Colors.white : Colors.paper} />}
+                onPress={() => setSmartBrush('remove')}
+                disabled={smartCounts.positive === 0}
+              />
+              <View style={styles.brushSpacer} />
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Seçimi temizle"
-                disabled={!hasActiveSelection || busy}
-                onPress={handleReset}
+                accessibilityLabel="Akıllı seçimi temizle"
+                disabled={busy || (smartCounts.positive === 0 && smartCounts.negative === 0)}
+                onPress={handleSmartReset}
                 style={({ pressed }) => [
                   styles.resetButton,
                   pressed && styles.pressed,
-                  (!hasActiveSelection || busy) && styles.resetDisabled,
+                  (busy || (smartCounts.positive === 0 && smartCounts.negative === 0)) &&
+                    styles.resetDisabled,
                 ]}>
                 <RotateCcw size={18} color={Colors.paper} strokeWidth={2} />
               </Pressable>
-              <ActionButton
-                label="Sticker yap"
-                icon={<Scissors size={18} color={Colors.white} strokeWidth={2} />}
-                onPress={handleManualExtract}
-                disabled={!canExtract}
-                style={styles.primaryAction}
-              />
-            </>
-          ) : (
-            <>
-              <View style={styles.brushRow}>
-                <BrushTab
-                  active={smartBrush === 'add'}
-                  label="Ekle"
-                  icon={<Plus size={14} color={smartBrush === 'add' ? Colors.white : Colors.paper} />}
-                  onPress={() => setSmartBrush('add')}
-                />
-                <BrushTab
-                  active={smartBrush === 'remove'}
-                  label="Çıkar"
-                  icon={<Eraser size={14} color={smartBrush === 'remove' ? Colors.white : Colors.paper} />}
-                  onPress={() => setSmartBrush('remove')}
-                  disabled={smartCounts.positive === 0}
-                />
-                <View style={styles.brushSpacer} />
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Akıllı seçimi temizle"
-                  disabled={busy || (smartCounts.positive === 0 && smartCounts.negative === 0)}
-                  onPress={handleSmartReset}
-                  style={({ pressed }) => [
-                    styles.resetButton,
-                    pressed && styles.pressed,
-                    (busy || (smartCounts.positive === 0 && smartCounts.negative === 0)) &&
-                      styles.resetDisabled,
-                  ]}>
-                  <RotateCcw size={18} color={Colors.paper} strokeWidth={2} />
-                </Pressable>
-              </View>
-              <ActionButton
-                label={
-                  smartPreparing
-                    ? 'Model yükleniyor…'
-                    : smartPreview
-                      ? 'Sticker yap'
-                      : 'Nesneye dokun'
-                }
-                icon={<Scissors size={18} color={Colors.white} strokeWidth={2} />}
-                onPress={handleSmartConfirm}
-                disabled={!smartPreview || busy || smartPreparing}
-              />
-            </>
-          )}
-        </View>
+            </View>
+            <ActionButton
+              label={smartPreview ? 'Sticker yap' : 'Nesneye dokun'}
+              icon={<Scissors size={18} color={Colors.white} strokeWidth={2} />}
+              onPress={handleSmartConfirm}
+              disabled={!smartPreview || busy}
+            />
+          </View>
+        ) : (
+          <View style={styles.actionsRow}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Seçimi temizle"
+              disabled={!hasActiveSelection || busy}
+              onPress={handleReset}
+              style={({ pressed }) => [
+                styles.resetButton,
+                pressed && styles.pressed,
+                (!hasActiveSelection || busy) && styles.resetDisabled,
+              ]}>
+              <RotateCcw size={18} color={Colors.paper} strokeWidth={2} />
+            </Pressable>
+            <ActionButton
+              label="Sticker yap"
+              icon={<Scissors size={18} color={Colors.white} strokeWidth={2} />}
+              onPress={handleManualExtract}
+              disabled={!canExtract}
+              style={styles.primaryAction}
+            />
+          </View>
+        )}
       </View>
 
       <Modal
@@ -1129,10 +1432,19 @@ const styles = StyleSheet.create({
   segmentLabelActive: {
     color: Colors.ink,
   },
+  aiActions: {
+    gap: Spacing.three,
+  },
   brushRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
+  },
+  engine: {
+    fontFamily: Fonts.sansMedium,
+    fontSize: 11,
+    letterSpacing: 0.2,
+    color: 'rgba(248, 241, 226, 0.5)',
   },
   brushTab: {
     flexDirection: 'row',

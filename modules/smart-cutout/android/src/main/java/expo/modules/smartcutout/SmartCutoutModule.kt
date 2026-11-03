@@ -86,9 +86,11 @@ class SmartCutoutModule : Module() {
           throw SmartCutoutException("Görsel boyutu okunamadı.", null)
         }
 
-        val strokes = ArrayList<Stroke>(2)
-        toStroke(positivePoints, Stroke.BrushMode.POSITIVE)?.let(strokes::add)
-        toStroke(negativePoints, Stroke.BrushMode.NEGATIVE)?.let(strokes::add)
+        // Her dokunuş/sürükleme ayrı bir vuruş olarak gönderilir; aksi halde
+        // model iki uzak noktayı tek bir fırça çizgisi sanıp yanlış bölge seçer.
+        val strokes = ArrayList<Stroke>(4)
+        strokes.addAll(toStrokes(positivePoints, Stroke.BrushMode.POSITIVE))
+        strokes.addAll(toStrokes(negativePoints, Stroke.BrushMode.NEGATIVE))
 
         if (strokes.isEmpty()) {
           throw SmartCutoutException("Seçim için en az bir nokta gerekli.", null)
@@ -149,29 +151,50 @@ class SmartCutoutModule : Module() {
     }
   }
 
-  private fun toStroke(points: List<Double>, mode: Stroke.BrushMode): Stroke? {
-    if (points.size < 2) {
-      return null
+  /**
+   * Düz nokta dizisini vuruşlara böler.
+   *
+   * Her vuruşun arasına JS tarafından `-1, -1` ayırıcısı konur. Böylece kullanıcı
+   * nesnenin iki ayrı yerine dokunduğunda model bu iki noktayı tek bir fırça
+   * çizgisi gibi birleştirmez; her dokunuş bağımsız bir pozitif vuruş olur.
+   */
+  private fun toStrokes(points: List<Double>, mode: Stroke.BrushMode): List<Stroke> {
+    val strokes = ArrayList<Stroke>()
+    var keypoints = ArrayList<NormalizedKeypoint>()
+
+    fun flush() {
+      if (keypoints.isEmpty()) {
+        return
+      }
+      strokes.add(
+        Stroke.builder()
+          .setBrushMode(mode)
+          .setPoints(keypoints)
+          .setCompleted(true)
+          .build()
+      )
+      keypoints = ArrayList()
     }
 
-    val keypoints = ArrayList<NormalizedKeypoint>(points.size / 2)
     var index = 0
     while (index + 1 < points.size) {
-      val x = points[index].toFloat().coerceIn(0f, 1f)
-      val y = points[index + 1].toFloat().coerceIn(0f, 1f)
-      keypoints.add(NormalizedKeypoint.create(x, y))
+      val x = points[index]
+      val y = points[index + 1]
+      if (x < 0 || y < 0) {
+        flush()
+      } else {
+        keypoints.add(
+          NormalizedKeypoint.create(
+            x.toFloat().coerceIn(0f, 1f),
+            y.toFloat().coerceIn(0f, 1f)
+          )
+        )
+      }
       index += 2
     }
 
-    if (keypoints.isEmpty()) {
-      return null
-    }
-
-    return Stroke.builder()
-      .setBrushMode(mode)
-      .setPoints(keypoints)
-      .setCompleted(true)
-      .build()
+    flush()
+    return strokes
   }
 
   /**
@@ -180,6 +203,10 @@ class SmartCutoutModule : Module() {
    * Maske float32 ise doğrudan okunur; aksi halde bitmap'e düşülür. Kenarlarda
    * sert bir eşik yerine dar bir geçiş bandı kullanılıyor: bu hem hayalet
    * pikselleri temizler hem de kesim kenarını yumuşak tutar.
+   *
+   * Model, nesnenin içindeki desenlerde/gölgelerde düşük güven döndürebiliyor.
+   * Bu yüzden ham maske `refineMask` ile temizlenir: küçük yarıklar kapatılır ve
+   * nesnenin içinde kalan delikler doldurulur.
    */
   private fun confidenceBitmap(mask: MPImage): Bitmap {
     val width = mask.width
@@ -190,9 +217,11 @@ class SmartCutoutModule : Module() {
 
     val confidence = readFloatMask(mask, width, height)
     if (confidence != null) {
+      val raw = IntArray(width * height) { smoothAlpha(confidence[it]) }
+      val refined = refineMask(raw, width, height)
       val pixels = IntArray(width * height)
-      for (index in 0 until width * height) {
-        val alpha = smoothAlpha(confidence[index])
+      for (index in pixels.indices) {
+        val alpha = refined[index]
         pixels[index] = if (alpha <= 0) {
           Color.TRANSPARENT
         } else {
@@ -224,17 +253,23 @@ class SmartCutoutModule : Module() {
     return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
   }
 
+  /**
+   * Güven maskesini float dizisi olarak okur.
+   *
+   * Çıktı her zaman tek kanallı `VEC32F1`'dir; belirli bir format istemek yerine
+   * MediaPipe'ın önerdiği doğrudan okuma kullanılır (resmî örnekteki gibi).
+   */
   private fun readFloatMask(mask: MPImage, width: Int, height: Int): FloatArray? {
     return try {
-      val buffer = ByteBufferExtractor.extract(mask, MPImage.IMAGE_FORMAT_VEC32F1)
-        ?: return null
+      val buffer = ByteBufferExtractor.extract(mask) ?: return null
       buffer.order(ByteOrder.nativeOrder())
+      val floats = buffer.asFloatBuffer()
       val expected = width * height
-      if (buffer.remaining() < expected * 4) {
+      if (floats.capacity() < expected) {
         return null
       }
+      floats.rewind()
       val values = FloatArray(expected)
-      val floats = buffer.asFloatBuffer()
       floats.get(values, 0, expected)
       values
     } catch (error: Exception) {
@@ -249,6 +284,161 @@ class SmartCutoutModule : Module() {
     // Kenarı daha da yumuşatmak için hafif bir smoothstep uyguluyoruz.
     val smooth = normalized * normalized * (3f - (2f * normalized))
     return (smooth * 255f).roundToInt()
+  }
+
+  /**
+   * Maskeyi temizler.
+   *
+   * 1. 3×3 kapatma (dilate → erode): ince yarıkları ve tırtıklı kenarları
+   *    kapatır. Kenar pikselleri korunur.
+   * 2. Kapalı delik doldurma: dışarıya bağlı olmayan ve seçimin %20'sinden
+   *    küçük boşluklar nesnenin parçası sayılır. Böylece modelin düşük güven
+   *    verdiği etiket/desen/gölge bölgeleri şeffaf delik olarak kalmaz.
+   *
+   * Gerçek boşluklar (ör. kupa kulpu) dışarıya bağlı olduğu için korunur;
+   * kullanıcı gerekirse "Çıkar" ile işaretleyebilir.
+   */
+  private fun refineMask(raw: IntArray, width: Int, height: Int): IntArray {
+    val total = width * height
+    if (total <= 0) {
+      return raw
+    }
+
+    val mask = BooleanArray(total)
+    var opaque = 0
+    for (index in 0 until total) {
+      if (raw[index] >= OPAQUE_ALPHA) {
+        mask[index] = true
+        opaque += 1
+      }
+    }
+    if (opaque == 0) {
+      return raw
+    }
+
+    val dilated = BooleanArray(total)
+    for (y in 0 until height) {
+      val row = y * width
+      for (x in 0 until width) {
+        val index = row + x
+        if (mask[index]) {
+          dilated[index] = true
+          continue
+        }
+        var hit = false
+        for (dy in -1..1) {
+          val ny = y + dy
+          if (ny < 0 || ny >= height) continue
+          val nrow = ny * width
+          for (dx in -1..1) {
+            val nx = x + dx
+            if (nx < 0 || nx >= width) continue
+            if (mask[nrow + nx]) {
+              hit = true
+              break
+            }
+          }
+          if (hit) break
+        }
+        dilated[index] = hit
+      }
+    }
+
+    val closed = BooleanArray(total)
+    for (y in 0 until height) {
+      val row = y * width
+      for (x in 0 until width) {
+        val index = row + x
+        if (!dilated[index]) continue
+        var all = true
+        for (dy in -1..1) {
+          if (!all) break
+          val ny = y + dy
+          if (ny < 0 || ny >= height) continue
+          val nrow = ny * width
+          for (dx in -1..1) {
+            val nx = x + dx
+            if (nx < 0 || nx >= width) continue
+            if (!dilated[nrow + nx]) {
+              all = false
+              break
+            }
+          }
+        }
+        closed[index] = all
+      }
+    }
+
+    val visited = BooleanArray(total)
+    val queue = IntArray(total)
+    val members = IntArray(total)
+    val maxHole = max(MIN_HOLE_PIXELS, min(MAX_HOLE_PIXELS, (opaque * 0.2).toInt()))
+
+    for (start in 0 until total) {
+      if (closed[start] || visited[start]) continue
+
+      var head = 0
+      var tail = 0
+      var size = 0
+      var touchesBorder = false
+
+      visited[start] = true
+      queue[tail++] = start
+
+      while (head < tail) {
+        val index = queue[head++]
+        members[size++] = index
+
+        val x = index % width
+        val y = index / width
+        if (x == 0 || y == 0 || x == width - 1 || y == height - 1) {
+          touchesBorder = true
+        }
+
+        if (x > 0) {
+          val next = index - 1
+          if (!closed[next] && !visited[next]) {
+            visited[next] = true
+            queue[tail++] = next
+          }
+        }
+        if (x < width - 1) {
+          val next = index + 1
+          if (!closed[next] && !visited[next]) {
+            visited[next] = true
+            queue[tail++] = next
+          }
+        }
+        if (y > 0) {
+          val next = index - width
+          if (!closed[next] && !visited[next]) {
+            visited[next] = true
+            queue[tail++] = next
+          }
+        }
+        if (y < height - 1) {
+          val next = index + width
+          if (!closed[next] && !visited[next]) {
+            visited[next] = true
+            queue[tail++] = next
+          }
+        }
+      }
+
+      if (!touchesBorder && size <= maxHole) {
+        for (i in 0 until size) {
+          closed[members[i]] = true
+        }
+      }
+    }
+
+    val out = raw.copyOf()
+    for (index in 0 until total) {
+      if (closed[index] && out[index] < 255) {
+        out[index] = 255
+      }
+    }
+    return out
   }
 
   private fun writeMask(context: Context, mask: MPImage): Map<String, Any?> {
@@ -369,10 +559,23 @@ class SmartCutoutModule : Module() {
     private const val MODEL_ASSET = "interactive_segmentation.task"
     private const val MASK_DIRECTORY = "smart-cutout"
 
-    /** Bu değerin altındaki güven tamamen şeffaf sayılır. */
-    private const val LOW_CONFIDENCE = 0.25f
+    /**
+     * Bu değerin altındaki güven tamamen şeffaf sayılır.
+     *
+     * Eşik bilinçli olarak düşük: modelin "emin değilim" dediği ama nesneye ait
+     * olan pikseller kesimden tamamen düşmesin. Gerçek arka plan gürültüsü zaten
+     * ~0 güven alır.
+     */
+    private const val LOW_CONFIDENCE = 0.08f
     /** Bu değerin üstündeki güven tamamen opak sayılır. */
-    private const val HIGH_CONFIDENCE = 0.75f
+    private const val HIGH_CONFIDENCE = 0.5f
+
+    /** Bu alfanın altındaki pikseller "boşluk" kabul edilir. */
+    private const val OPAQUE_ALPHA = 32
+
+    /** Delik doldurma alt/üst sınırları (piksel). */
+    private const val MIN_HOLE_PIXELS = 96
+    private const val MAX_HOLE_PIXELS = 60_000
   }
 }
 
