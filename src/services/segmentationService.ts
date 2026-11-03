@@ -122,10 +122,13 @@ const LOCAL_COLOR_TOLERANCE = 46;
 const LOCAL_MIN_REGION_PIXELS = 32;
 
 /** Yedek algoritmada tek vuruştan en fazla kaç tohum noktası kullanılır. */
-const POSITIVE_SEED_LIMIT = 6;
-const NEGATIVE_SEED_LIMIT = 6;
-/** Toplam tohum sayısı: pahalı flood-fill'i sınırlar. */
-const MAX_POSITIVE_SEEDS = 24;
+const POSITIVE_SEED_LIMIT = 4;
+const NEGATIVE_SEED_LIMIT = 4;
+/**
+ * Toplam tohum sayısı: her tohum tam bir flood-fill çalıştırdığı için bu sayı
+ * düşük tutulur, aksi halde yedek algoritma saniyeler sürer.
+ */
+const MAX_POSITIVE_SEEDS = 8;
 
 /** Uzun bir vuruştan eşit aralıklı en fazla `limit` nokta seçer. */
 function sampleStroke(stroke: Point[], limit: number): Point[] {
