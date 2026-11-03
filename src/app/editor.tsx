@@ -1,17 +1,31 @@
 import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { ActionButton } from '@/components/ActionButton';
 import { ObjectCutter } from '@/components/ObjectCutter';
 import { Colors, Fonts, Spacing } from '@/constants/theme';
-import { clearPendingPhoto, getPendingPhoto } from '@/services/photoSession';
+import {
+  clearPendingPhoto,
+  getPendingPhoto,
+  subscribePendingPhoto,
+} from '@/services/photoSession';
 
 export default function EditorScreen() {
   // Route parametresi kullanmıyoruz: dosya URI'si yönlendirme sırasında
   // URL-decode edilerek bozuluyordu.
-  const [pending] = useState(getPendingPhoto);
+  const [pending, setPending] = useState(getPendingPhoto);
+
+  // Editör açıkken yeni bir görsel paylaşılırsa içerik tazelenir; ekranda
+  // kalıp eski fotoğrafı göstermeye devam etmeyiz.
+  useEffect(
+    () =>
+      subscribePendingPhoto((photo) => {
+        setPending(photo);
+      }),
+    [],
+  );
 
   const uri = pending?.uri;
   const source = pending?.source ?? 'camera';
@@ -34,6 +48,7 @@ export default function EditorScreen() {
     <>
       <StatusBar style="light" />
       <ObjectCutter
+        key={uri}
         imageUri={uri}
         source={source}
         hasAlpha={hasAlpha}

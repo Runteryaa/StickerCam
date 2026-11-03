@@ -51,9 +51,9 @@ export function useSharedImageIntake(): void {
         hasAlpha: prepared.hasAlpha,
       });
 
-      if (pathnameRef.current === '/editor') {
-        router.replace('/editor');
-      } else {
+      // Editör zaten açıksa `subscribePendingPhoto` içeriği tazeler; yeniden
+      // yönlendirmeye gerek yok.
+      if (pathnameRef.current !== '/editor') {
         router.push('/editor');
       }
     } catch (error) {

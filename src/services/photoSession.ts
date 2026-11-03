@@ -21,8 +21,19 @@ type PendingPhoto = {
 
 let pendingPhoto: PendingPhoto | null = null;
 
+type PendingPhotoListener = (photo: PendingPhoto) => void;
+
+const listeners = new Set<PendingPhotoListener>();
+
+function notify(photo: PendingPhoto): void {
+  for (const listener of listeners) {
+    listener(photo);
+  }
+}
+
 export function setPendingPhoto(photo: PendingPhoto): void {
   pendingPhoto = photo;
+  notify(photo);
 }
 
 export function getPendingPhoto(): PendingPhoto | null {
@@ -31,4 +42,15 @@ export function getPendingPhoto(): PendingPhoto | null {
 
 export function clearPendingPhoto(): void {
   pendingPhoto = null;
+}
+
+/**
+ * Editör açıkken yeni bir fotoğraf gelirse (ör. uygulama açıkken başka bir
+ * uygulamadan paylaşım) editörün içeriğini tazelemek için kullanılır.
+ */
+export function subscribePendingPhoto(listener: PendingPhotoListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
