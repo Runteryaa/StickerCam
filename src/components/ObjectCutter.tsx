@@ -636,6 +636,20 @@ export function ObjectCutter({
           }}>
           {image ? (
             <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
+              {mode === 'ai' && smartPreview ? (
+                // Önizleme görünürken orijinal fotoğraf arkada soluk kalır;
+                // böylece "Çıkar" ile işaretlenecek bölgeler kaybolmuş olmaz.
+                <Group opacity={0.18}>
+                  <SkiaImage
+                    image={image}
+                    x={fit.x}
+                    y={fit.y}
+                    width={fit.width}
+                    height={fit.height}
+                    fit="contain"
+                  />
+                </Group>
+              ) : null}
               <SkiaImage
                 image={mode === 'ai' && smartPreview ? smartPreview : image}
                 x={fit.x}
