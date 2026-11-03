@@ -15,12 +15,13 @@ import {
   ImageFormat,
   Path,
   Rect as SkiaRect,
+  Skia,
   type SkImage,
 } from '@shopify/react-native-skia';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS, useDerivedValue, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ArrowLeft, Check, Pencil, RotateCcw, Scissors, Wand2 } from 'lucide-react-native';
+import { ArrowLeft, Check, Crop, Pencil, RotateCcw, Scissors, Wand2 } from 'lucide-react-native';
 
 import { ActionButton } from '@/components/ActionButton';
 import { TransparencyPreview } from '@/components/TransparencyPreview';
@@ -36,11 +37,11 @@ import {
   type StickerRecord,
   type StickerSource,
 } from '@/services/stickerService';
-import { containRect, viewPointToImage, type Point } from '@/utils/geometry';
-import { buildLassoPath } from '@/utils/lasso';
+import { containRect, viewPointToImage, type Point, type Rect } from '@/utils/geometry';
+import { buildLassoPath, buildPolygonPath } from '@/utils/lasso';
 import { cutOutWithPath, finalizeSticker } from '@/utils/stickerImage';
 
-type SelectionMode = 'lasso' | 'ai';
+type SelectionMode = 'lasso' | 'quad' | 'ai';
 
 type ObjectCutterProps = {
   imageUri: string;
@@ -77,6 +78,21 @@ export function ObjectCutter({
 
   const points = useSharedValue<Point[]>([]);
   const lassoPath = useDerivedValue(() => buildLassoPath(points.value));
+
+  // Dört köşe seçimi: köşeler görünür alan koordinatında tutulur.
+  const quadCorners = useSharedValue<Point[]>([]);
+  const quadPath = useDerivedValue(() => buildPolygonPath(quadCorners.value));
+  const quadHandles = useDerivedValue(() => {
+    const path = Skia.PathBuilder.Make();
+    for (const corner of quadCorners.value) {
+      path.addCircle(corner.x, corner.y, 11);
+    }
+    return path.build();
+  });
+  const dragCorner = useSharedValue(-1);
+  const dragStart = useSharedValue<Point>({ x: 0, y: 0 });
+  const dragFrom = useSharedValue<Point[]>([]);
+
   const stagedRef = useRef<StagedSticker | null>(null);
 
   const imageSize = useMemo(
@@ -88,6 +104,28 @@ export function ObjectCutter({
     () => containRect(imageSize.width, imageSize.height, stageSize.width, stageSize.height),
     [imageSize.height, imageSize.width, stageSize.height, stageSize.width],
   );
+
+  /** Görselin içine %8 boşluk bırakan varsayılan dörtgen. */
+  const makeDefaultCorners = useCallback((rect: Rect): Point[] => {
+    if (rect.width <= 0 || rect.height <= 0) {
+      return [];
+    }
+    const insetX = rect.width * 0.08;
+    const insetY = rect.height * 0.08;
+    return [
+      { x: rect.x + insetX, y: rect.y + insetY },
+      { x: rect.x + rect.width - insetX, y: rect.y + insetY },
+      { x: rect.x + rect.width - insetX, y: rect.y + rect.height - insetY },
+      { x: rect.x + insetX, y: rect.y + rect.height - insetY },
+    ];
+  }, []);
+
+  useEffect(() => {
+    if (mode !== 'quad' || !image || fit.width <= 0 || fit.height <= 0) {
+      return;
+    }
+    quadCorners.value = makeDefaultCorners(fit);
+  }, [fit, image, makeDefaultCorners, mode, quadCorners]);
 
   const openDraft = useCallback((finalImage: SkImage, stickerSource: StickerSource) => {
     const base64 = finalImage.encodeToBase64(ImageFormat.PNG, 100);
@@ -101,26 +139,33 @@ export function ObjectCutter({
     setDraft(staged);
   }, []);
 
-  const handleLassoExtract = useCallback(async () => {
+  const handleManualExtract = useCallback(async () => {
     if (!image) {
       return;
     }
-    const rawPoints = points.value;
-    if (rawPoints.length < 3) {
-      setStatus('Önce parmağınla nesnenin etrafını çiz.');
+    const viewPoints = mode === 'quad' ? quadCorners.value : points.value;
+    if (viewPoints.length < 3) {
+      setStatus(
+        mode === 'quad'
+          ? 'Önce dört köşeyi yerleştir.'
+          : 'Önce parmağınla nesnenin etrafını çiz.',
+      );
       return;
     }
 
     setBusy(true);
     setStatus('Nesne kesiliyor…');
     try {
-      const imagePoints = rawPoints.map((point) =>
+      const imagePoints = viewPoints.map((point) =>
         viewPointToImage(point, fit, imageSize),
       );
-      const path = buildLassoPath(imagePoints);
+      const path =
+        mode === 'quad'
+          ? buildPolygonPath(imagePoints)
+          : buildLassoPath(imagePoints);
       const cutout = cutOutWithPath(image, path, imageSize);
       if (!cutout) {
-        throw new Error('Seçim çok küçük görünüyor. Daha geniş bir alan çiz.');
+        throw new Error('Seçim çok küçük görünüyor. Daha geniş bir alan seç.');
       }
       openDraft(finalizeSticker(cutout), source);
       setStatus(null);
@@ -130,7 +175,7 @@ export function ObjectCutter({
     } finally {
       setBusy(false);
     }
-  }, [fit, image, imageSize, openDraft, points, source]);
+  }, [fit, image, imageSize, mode, openDraft, points, quadCorners, source]);
 
   const handleSmartTap = useCallback(
     async (viewX: number, viewY: number) => {
@@ -210,12 +255,103 @@ export function ObjectCutter({
     [busy, handleSmartTap],
   );
 
+  /**
+   * Dört köşe seçimi: bir köşeye yakın başlarsan o köşeyi, boş alandan
+   * başlarsan tüm dörtgeni sürükler.
+   */
+  const quadGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(!busy)
+        .minDistance(0)
+        .maxPointers(1)
+        .onBegin((event) => {
+          const corners = quadCorners.value;
+          if (corners.length !== 4) {
+            return;
+          }
+          let nearest = -1;
+          let nearestDistance = Number.POSITIVE_INFINITY;
+          for (let index = 0; index < corners.length; index += 1) {
+            const distance = Math.hypot(
+              corners[index].x - event.x,
+              corners[index].y - event.y,
+            );
+            if (distance < nearestDistance) {
+              nearestDistance = distance;
+              nearest = index;
+            }
+          }
+          dragCorner.value = nearestDistance <= 64 ? nearest : -1;
+          dragStart.value = { x: event.x, y: event.y };
+          dragFrom.value = corners;
+          runOnJS(setStatus)(null);
+        })
+        .onUpdate((event) => {
+          const from = dragFrom.value;
+          if (from.length !== 4) {
+            return;
+          }
+
+          const left = fit.x;
+          const top = fit.y;
+          const right = fit.x + fit.width;
+          const bottom = fit.y + fit.height;
+
+          if (dragCorner.value >= 0) {
+            const index = dragCorner.value;
+            const next = from.slice();
+            next[index] = {
+              x: Math.min(Math.max(event.x, left), right),
+              y: Math.min(Math.max(event.y, top), bottom),
+            };
+            quadCorners.value = next;
+            return;
+          }
+
+          let minX = Number.POSITIVE_INFINITY;
+          let minY = Number.POSITIVE_INFINITY;
+          let maxX = Number.NEGATIVE_INFINITY;
+          let maxY = Number.NEGATIVE_INFINITY;
+          for (const corner of from) {
+            minX = Math.min(minX, corner.x);
+            minY = Math.min(minY, corner.y);
+            maxX = Math.max(maxX, corner.x);
+            maxY = Math.max(maxY, corner.y);
+          }
+
+          const deltaX = Math.min(
+            Math.max(event.x - dragStart.value.x, left - minX),
+            right - maxX,
+          );
+          const deltaY = Math.min(
+            Math.max(event.y - dragStart.value.y, top - minY),
+            bottom - maxY,
+          );
+
+          quadCorners.value = from.map((corner) => ({
+            x: corner.x + deltaX,
+            y: corner.y + deltaY,
+          }));
+        })
+        .onFinalize(() => {
+          dragCorner.value = -1;
+          runOnJS(setHasSelection)(true);
+        }),
+    [busy, dragCorner, dragFrom, dragStart, fit, quadCorners],
+  );
+
   const handleReset = useCallback(() => {
-    points.value = [];
-    setHasSelection(false);
+    if (mode === 'quad') {
+      quadCorners.value = makeDefaultCorners(fit);
+      setHasSelection(true);
+    } else {
+      points.value = [];
+      setHasSelection(false);
+    }
     setIsDrawing(false);
     setStatus(null);
-  }, [points]);
+  }, [fit, makeDefaultCorners, mode, points, quadCorners]);
 
   const handleModeChange = useCallback(
     (next: SelectionMode) => {
@@ -225,10 +361,15 @@ export function ObjectCutter({
       setMode(next);
       setStatus(null);
       points.value = [];
-      setHasSelection(false);
       setIsDrawing(false);
+      if (next === 'quad') {
+        quadCorners.value = makeDefaultCorners(fit);
+        setHasSelection(true);
+      } else {
+        setHasSelection(false);
+      }
     },
-    [mode, points],
+    [fit, makeDefaultCorners, mode, points, quadCorners],
   );
 
   const handleDiscard = useCallback(() => {
@@ -265,11 +406,15 @@ export function ObjectCutter({
   const instruction =
     mode === 'lasso'
       ? 'Parmağını nesnenin çevresinde gezdir; çizgi kendiliğinden kapanır.'
-      : smartSelectionReady
-        ? 'Nesnenin üzerine tek dokunuş yap; benzer renkli bölge otomatik seçilsin.'
-        : 'Akıllı kesim servisi bağlı değil. Çizim modunda etrafını çizebilirsin.';
+      : mode === 'quad'
+        ? 'Köşe tutamaçlarını sürükleyerek dörtgeni nesneye oturt. İçeriden sürükleyince tümü taşınır.'
+        : smartSelectionReady
+          ? 'Nesnenin üzerine tek dokunuş yap; benzer renkli bölge otomatik seçilsin.'
+          : 'Akıllı kesim servisi bağlı değil. Çizim modunda etrafını çizebilirsin.';
 
   const canExtract = Boolean(image) && !busy;
+  const hasActiveSelection =
+    mode === 'quad' ? fit.width > 0 && fit.height > 0 : hasSelection;
 
   return (
     <View style={styles.root}>
@@ -290,7 +435,10 @@ export function ObjectCutter({
         </View>
       </View>
 
-      <GestureDetector gesture={mode === 'lasso' ? panGesture : tapGesture}>
+      <GestureDetector
+        gesture={
+          mode === 'lasso' ? panGesture : mode === 'quad' ? quadGesture : tapGesture
+        }>
         <View
           style={styles.stage}
           onLayout={(event) => {
@@ -307,8 +455,8 @@ export function ObjectCutter({
                 height={fit.height}
                 fit="contain"
               />
-              {isDrawing || hasSelection ? (
-                <Group clip={lassoPath} invertClip>
+              {mode === 'quad' || isDrawing || hasSelection ? (
+                <Group clip={mode === 'quad' ? quadPath : lassoPath} invertClip>
                   <SkiaRect
                     x={0}
                     y={0}
@@ -319,7 +467,7 @@ export function ObjectCutter({
                 </Group>
               ) : null}
               <Path
-                path={lassoPath}
+                path={mode === 'quad' ? quadPath : lassoPath}
                 style="stroke"
                 strokeWidth={6}
                 color="rgba(223, 95, 55, 0.32)"
@@ -327,13 +475,24 @@ export function ObjectCutter({
                 strokeCap="round"
               />
               <Path
-                path={lassoPath}
+                path={mode === 'quad' ? quadPath : lassoPath}
                 style="stroke"
                 strokeWidth={2}
                 color={Colors.white}
                 strokeJoin="round"
                 strokeCap="round"
               />
+              {mode === 'quad' ? (
+                <>
+                  <Path path={quadHandles} style="fill" color={Colors.paper} />
+                  <Path
+                    path={quadHandles}
+                    style="stroke"
+                    strokeWidth={2.5}
+                    color={Colors.accent}
+                  />
+                </>
+              ) : null}
             </Canvas>
           ) : (
             <View style={styles.loading}>
@@ -359,11 +518,17 @@ export function ObjectCutter({
           <View style={styles.stageBadge}>
             {mode === 'lasso' ? (
               <Pencil size={13} color={Colors.paper} strokeWidth={2} />
+            ) : mode === 'quad' ? (
+              <Crop size={13} color={Colors.paper} strokeWidth={2} />
             ) : (
               <Wand2 size={13} color={Colors.paper} strokeWidth={2} />
             )}
             <Text style={styles.stageBadgeText}>
-              {mode === 'lasso' ? 'SERBEST ÇİZİM' : 'AKILLI SEÇİM'}
+              {mode === 'lasso'
+                ? 'SERBEST ÇİZİM'
+                : mode === 'quad'
+                  ? 'DÖRT KÖŞE'
+                  : 'AKILLI SEÇİM'}
             </Text>
           </View>
 
@@ -382,13 +547,19 @@ export function ObjectCutter({
         <View style={styles.segment}>
           <ModeTab
             active={mode === 'lasso'}
-            label="Serbest çizim"
+            label="Serbest"
             icon={<Pencil size={15} color={mode === 'lasso' ? Colors.ink : Colors.inkSoft} />}
             onPress={() => handleModeChange('lasso')}
           />
           <ModeTab
+            active={mode === 'quad'}
+            label="Dörtgen"
+            icon={<Crop size={15} color={mode === 'quad' ? Colors.ink : Colors.inkSoft} />}
+            onPress={() => handleModeChange('quad')}
+          />
+          <ModeTab
             active={mode === 'ai'}
-            label="Akıllı seçim"
+            label="Akıllı"
             icon={<Wand2 size={15} color={mode === 'ai' ? Colors.ink : Colors.inkSoft} />}
             onPress={() => handleModeChange('ai')}
           />
@@ -399,24 +570,24 @@ export function ObjectCutter({
         {status && !busy ? <Text style={styles.status}>{status}</Text> : null}
 
         <View style={styles.actionsRow}>
-          {mode === 'lasso' ? (
+          {mode !== 'ai' ? (
             <>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Seçimi temizle"
-                disabled={!hasSelection || busy}
+                disabled={!hasActiveSelection || busy}
                 onPress={handleReset}
                 style={({ pressed }) => [
                   styles.resetButton,
                   pressed && styles.pressed,
-                  (!hasSelection || busy) && styles.resetDisabled,
+                  (!hasActiveSelection || busy) && styles.resetDisabled,
                 ]}>
                 <RotateCcw size={18} color={Colors.paper} strokeWidth={2} />
               </Pressable>
               <ActionButton
                 label="Sticker yap"
                 icon={<Scissors size={18} color={Colors.white} strokeWidth={2} />}
-                onPress={handleLassoExtract}
+                onPress={handleManualExtract}
                 disabled={!canExtract}
                 style={styles.primaryAction}
               />

@@ -40,3 +40,24 @@ export function pathArea(path: SkPath): number {
   const bounds = path.getBounds();
   return bounds.width * bounds.height;
 }
+
+/**
+ * Köşe noktalarından düz kenarlı, kapalı bir çokgen path'i üretir.
+ * Dört köşe seçiminde hem önizleme hem kesim için kullanılır.
+ */
+export function buildPolygonPath(points: Point[]): SkPath {
+  'worklet';
+  const path = Skia.PathBuilder.Make();
+  if (points.length === 0) {
+    return path.build();
+  }
+
+  path.moveTo(points[0].x, points[0].y);
+  for (let index = 1; index < points.length; index += 1) {
+    path.lineTo(points[index].x, points[index].y);
+  }
+  if (points.length >= 3) {
+    path.close();
+  }
+  return path.build();
+}

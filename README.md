@@ -24,10 +24,14 @@ Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanima
   normalize edilmesi (`expo-image-manipulator`).
 - **Serbest çizim (lasso)**: parmakla çizilen kapalı seçim, orta nokta yumuşatmalı
   path, seçim dışının karartılması. Tamamen offline.
+- **Dört köşe**: sürüklenebilir dört tutamaçla düz kenarlı kesim. Köşe tutamacı
+  nesneye oturtulur; dörtgenin içinden sürükleyince tüm seçim taşınır.
 - **Akıllı seçim**: dokunulan noktayı sağlayıcı arayüzüne gönderen modüler
   segmentasyon katmanı (`src/services/segmentationService.ts`). Varsayılan olarak
   cihaz üzerinde çalışan, benzer renkli bağlantılı bölgeyi seçen yerel sağlayıcı
-  etkindir. İsteğe bağlı olarak uzak HTTP servisi veya demo sağlayıcı kullanılabilir.
+  etkindir. Maske 1024 px'te hesaplanıp tam çözünürlüğe yumuşatılarak büyütülür,
+  böylece kesim kenarları pikselli görünmez. İsteğe bağlı olarak uzak HTTP servisi
+  veya demo sağlayıcı kullanılabilir.
 - **Kesim**: lasso path'i görsel piksel uzayına taşınır, Skia offscreen surface
   üzerinde kırpılır, tamamen şeffaf kenarlar kırpılır (sıkı bbox), beyaz sticker
   konturu dosyaya işlenir ve PNG olarak kaydedilir.
@@ -149,7 +153,7 @@ Bu, gerçek bir model değildir; dokunulan noktanın çevresinde elips kesim ür
 src/app/index.tsx            Sticker tepsisi (ana ekran)
 src/app/camera.tsx           Kamera + izin akışı
 src/app/editor.tsx           Bellekteki bekleyen fotoğrafı ObjectCutter'a köprü
-src/components/ObjectCutter.tsx     Lasso / akıllı seçim, kesim, önizleme, kaydetme
+src/components/ObjectCutter.tsx     Lasso / dört köşe / akıllı seçim, kesim, önizleme, kaydetme
 src/components/ActionButton.tsx     Ortak buton
 src/components/TransparencyPreview.tsx  Damalı zemin önizlemesi
 src/services/imageService.ts        EXIF düzeltme + boyut normalizasyonu
@@ -158,7 +162,7 @@ src/services/photoSession.ts        Kamera/galeri -> editör bellek aktarımı
 src/services/skiaImageLoader.ts     Güvenilir Skia görsel yükleme
 src/services/segmentationService.ts Sağlayıcı arayüzü, yerel/HTTP/demo sağlayıcı
 src/utils/geometry.ts               contain-fit ve koordinat dönüşümleri
-src/utils/lasso.ts                  Worklet uyumlu lasso path üretimi
+src/utils/lasso.ts                  Worklet uyumlu lasso / çokgen path üretimi
 src/utils/stickerImage.ts           Kırpma, sıkı bbox, beyaz kontur
 ```
 

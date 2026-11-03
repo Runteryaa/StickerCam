@@ -8,6 +8,7 @@ import {
   ImageFormat,
   MipmapMode,
   Skia,
+  TileMode,
   type SkImage,
 } from '@shopify/react-native-skia';
 
@@ -203,9 +204,15 @@ export const demoLocalSegmentationProvider: SegmentationProvider = {
  * bağlantılı bölgeyi seçer. Düz/az desenli zeminlerde pratik sonuç verir;
  * karmaşık fotoğraflarda serbest çizim daha güvenilirdir.
  */
-const LOCAL_MASK_MAX_DIMENSION = 640;
+/**
+ * Maske bu çözünürlükte hesaplanır. Küçük değerler hızlıdır ama büyütüldüğünde
+ * kenarlar merdiven gibi görünür; 1024 dengeli bir nokta.
+ */
+const LOCAL_MASK_MAX_DIMENSION = 1024;
 const LOCAL_COLOR_TOLERANCE = 52;
 const LOCAL_MIN_REGION_PIXELS = 32;
+/** Maskeyi tam çözünürlüğe büyütürken kenarları yumuşatan blur üst sınırı. */
+const LOCAL_EDGE_BLUR_MAX = 2.5;
 
 type RegionMask = {
   mask: Uint8Array;
@@ -449,7 +456,7 @@ function makeMaskThumbnail(image: SkImage): {
     Skia.XYWHRect(0, 0, image.width(), image.height()),
     Skia.XYWHRect(0, 0, width, height),
     FilterMode.Linear,
-    MipmapMode.None,
+    MipmapMode.Linear,
     paint,
   );
   surface.flush();
@@ -528,15 +535,22 @@ export const localRegionSegmentationProvider: SegmentationProvider = {
       paint,
     );
 
+    // Maske küçük çözünürlükte üretildiği için büyütülünce kenarları keskin
+    // kareler halinde kalıyor. Ölçekle orantılı küçük bir blur, kesim kenarını
+    // yumuşatıp gerçek bir anti-aliasing etkisi veriyor.
+    const maskScale = Math.max(width / thumbnail.width, height / thumbnail.height);
+    const edgeBlur = Math.min(LOCAL_EDGE_BLUR_MAX, Math.max(0.6, maskScale * 0.55));
+
     const maskPaint = Skia.Paint();
     maskPaint.setAntiAlias(true);
     maskPaint.setBlendMode(BlendMode.DstIn);
+    maskPaint.setImageFilter(Skia.ImageFilter.MakeBlur(edgeBlur, edgeBlur, TileMode.Decal));
     canvas.drawImageRectOptions(
       mask,
       Skia.XYWHRect(0, 0, thumbnail.width, thumbnail.height),
       Skia.XYWHRect(0, 0, width, height),
       FilterMode.Linear,
-      MipmapMode.None,
+      MipmapMode.Linear,
       maskPaint,
     );
     surface.flush();
