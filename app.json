@@ -2,7 +2,7 @@
   "expo": {
     "name": "StickerCam",
     "slug": "stickercam",
-    "version": "1.4.2",
+    "version": "1.4.3",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "stickercam",
@@ -59,7 +59,8 @@
       "expo-sharing",
       "./plugins/withWhatsAppStickers",
       "./plugins/withShareIntent",
-      "./plugins/withModelAssets"
+      "./plugins/withModelAssets",
+      "./plugins/withProguardRules"
     ],
     "experiments": {
       "typedRoutes": true,

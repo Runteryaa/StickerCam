@@ -11,6 +11,9 @@ android {
   defaultConfig {
     versionCode 1
     versionName '1.0.0'
+    // Release derlemesindeki R8 reflection'ı bozmasın diye MediaPipe kuralları
+    // uygulamaya otomatik aktarılır.
+    consumerProguardFiles 'consumer-rules.pro'
   }
   // Model gibi büyük varlıkların APK içinde sıkıştırılmadan saklanması gerekir;
   // aksi halde MediaPipe modeli doğrudan dosya olarak açamaz.

@@ -172,7 +172,7 @@ export function ObjectCutter({
   const dragFrom = useSharedValue<Point[]>([]);
   const dragEnd = useSharedValue<Point>({ x: 0, y: 0 });
   const dragMoved = useSharedValue(0);
-  /** 0 = yok, 1 = köşe, 2 = tüm şekil, 3 = kenara dokunma (köşe ekle). */
+  /** 0 = yok, 1 = köşe sürükleme, 2 = tüm şekli taşıma. */
   const dragKind = useSharedValue(0);
   const loupeVisible = useSharedValue(false);
   const loupeCenter = useSharedValue<Point>({ x: 0, y: 0 });
@@ -561,45 +561,6 @@ export function ObjectCutter({
     [busy, handleSmartStroke, smartStroke],
   );
 
-  /**
-   * Kenara dokununca araya yeni bir köşe ekler; çokgenin şekli bozulmaz,
-   * kullanıcı yeni tutamacı istediği yere sürükler.
-   */
-  const insertCornerAt = useCallback(
-    (x: number, y: number) => {
-      const corners = quadCorners.value;
-      if (corners.length < 3) {
-        return;
-      }
-
-      let bestIndex = -1;
-      let bestDistance = Number.POSITIVE_INFINITY;
-      let bestPoint: Point | null = null;
-
-      for (let index = 0; index < corners.length; index += 1) {
-        const a = corners[index];
-        const b = corners[(index + 1) % corners.length];
-        const hit = segmentHit(x, y, a.x, a.y, b.x, b.y);
-        if (hit.distance < bestDistance) {
-          bestDistance = hit.distance;
-          bestIndex = index;
-          bestPoint = { x: hit.x, y: hit.y };
-        }
-      }
-
-      if (bestIndex < 0 || !bestPoint || bestDistance > EDGE_HIT_RADIUS) {
-        return;
-      }
-
-      const next = corners.slice();
-      next.splice(bestIndex + 1, 0, bestPoint);
-      quadCorners.value = next;
-      setHasSelection(true);
-      setStatus('Köşe eklendi. Sürükleyerek yerleştir.');
-    },
-    [quadCorners],
-  );
-
   /** Köşeyi siler (en az üç köşe kalmalı). */
   const removeCorner = useCallback(
     (index: number) => {
@@ -635,7 +596,7 @@ export function ObjectCutter({
    * Çokgen seçimi:
    *  - köşe tutamacını sürükle → yalnızca o köşe taşınır (büyüteç açılır),
    *  - şeklin içinden sürükle → tüm çokgen taşınır,
-   *  - kenara dokun → araya köşe eklenir,
+   *  - kenara dokun → köşe hemen eklenir ve aynı hareketle sürüklenir,
    *  - köşeye çift dokun → köşe silinir.
    */
   const quadGesture = useMemo(
@@ -681,16 +642,47 @@ export function ObjectCutter({
           }
 
           let edgeDistance = Number.POSITIVE_INFINITY;
+          let edgeIndex = -1;
+          let edgePoint: Point = { x: event.x, y: event.y };
           for (let index = 0; index < corners.length; index += 1) {
             const a = corners[index];
             const b = corners[(index + 1) % corners.length];
             const hit = segmentHit(event.x, event.y, a.x, a.y, b.x, b.y);
             if (hit.distance < edgeDistance) {
               edgeDistance = hit.distance;
+              edgeIndex = index;
+              edgePoint = { x: hit.x, y: hit.y };
             }
           }
-          if (edgeDistance <= EDGE_HIT_RADIUS) {
-            dragKind.value = 3;
+
+          // Kenara dokunuldu: köşeyi hemen ekliyoruz ve aynı hareketle
+          // sürüklenebilir hale getiriyoruz. Böylece "dokun ve yerleştir"
+          // tek hamlede oluyor; ayrıca yeni köşeyi tekrar bulmak gerekmiyor.
+          if (edgeDistance <= EDGE_HIT_RADIUS && edgeIndex >= 0) {
+            const left = fit.x;
+            const top = fit.y;
+            const right = fit.x + fit.width;
+            const bottom = fit.y + fit.height;
+            const inserted: Point = {
+              x: Math.min(Math.max(edgePoint.x, left), right),
+              y: Math.min(Math.max(edgePoint.y, top), bottom),
+            };
+
+            const next = corners.slice();
+            const insertedIndex = edgeIndex + 1;
+            next.splice(insertedIndex, 0, inserted);
+
+            quadCorners.value = next;
+            dragFrom.value = next;
+            dragKind.value = 1;
+            dragCorner.value = insertedIndex;
+            loupeCenter.value = inserted;
+            loupeVisible.value = true;
+            runOnJS(setStatus)(
+              next.length > 4
+                ? 'Köşe eklendi. Sürükleyerek yerleştir.'
+                : 'Köşe eklendi.',
+            );
             return;
           }
 
@@ -763,9 +755,7 @@ export function ObjectCutter({
         .onFinalize(() => {
           const kind = dragKind.value;
           const index = dragCorner.value;
-          if (kind === 3 && dragMoved.value < TAP_SLOP) {
-            runOnJS(insertCornerAt)(dragEnd.value.x, dragEnd.value.y);
-          } else if (kind === 1 && index >= 0 && dragMoved.value < TAP_SLOP) {
+          if (kind === 1 && index >= 0 && dragMoved.value < TAP_SLOP) {
             runOnJS(handleCornerTap)(index);
           }
 
@@ -784,7 +774,6 @@ export function ObjectCutter({
       dragStart,
       fit,
       handleCornerTap,
-      insertCornerAt,
       loupeCenter,
       loupeVisible,
       quadCorners,
