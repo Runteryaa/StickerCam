@@ -17,6 +17,10 @@ const MAX_DIMENSION = 1024;
 export type SmartCutoutSession = {
   width: number;
   height: number;
+  /** Model hazırlık sırasında yüklenebildi mi? */
+  modelLoaded: boolean;
+  /** Model yüklenemediyse nedeni. */
+  error: string | null;
 };
 
 export function isNativeSmartCutoutAvailable(): boolean {

@@ -3,6 +3,10 @@ import { NativeModule, requireOptionalNativeModule } from 'expo';
 export type SmartCutoutSize = {
   width: number;
   height: number;
+  /** Model hazırlık sırasında yüklenebildi mi? */
+  modelLoaded: boolean;
+  /** Model yüklenemediyse nedeni (birden fazla stratejinin hata mesajı). */
+  error: string | null;
 };
 
 export type SmartCutoutMask = {

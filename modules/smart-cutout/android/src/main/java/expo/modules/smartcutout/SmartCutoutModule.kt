@@ -18,6 +18,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.min
@@ -42,6 +43,8 @@ class SmartCutoutModule : Module() {
   private var preparedImage: MPImage? = null
   private var preparedWidth = 0
   private var preparedHeight = 0
+  /** Model yüklenemediyse nedeni; kullanıcıya gösterilir. */
+  private var loadError: String? = null
 
   override fun definition() = ModuleDefinition {
     Name("SmartCutout")
@@ -51,40 +54,44 @@ class SmartCutoutModule : Module() {
         releaseSession()
         val context = requireContext()
         val bitmap = decodeScaled(context, uri, maxDimension.coerceIn(256, 2048))
-        val segmenter = createSegmenter(context)
-        val mpImage = BitmapImageBuilder(bitmap).build()
-
-        try {
-          segmenter.setImage(mpImage)
-        } catch (error: Exception) {
-          runCatching { mpImage.close() }
-          runCatching { segmenter.close() }
-          runCatching { bitmap.recycle() }
-          throw SmartCutoutException("Görsel akıllı kesim modeline verilemedi.", error)
-        }
 
         preparedBitmap = bitmap
-        preparedImage = mpImage
-        this@SmartCutoutModule.segmenter = segmenter
         preparedWidth = bitmap.width
         preparedHeight = bitmap.height
 
+        // Modeli şimdi yüklemeye çalışıyoruz. Başarısız olursa görseli
+        // bırakıp ilk dokunuşta tekrar deniyoruz: bazı cihazlarda ilk deneme
+        // bellek baskısı yüzünden düşebiliyor.
+        attachSegmenter(context, bitmap)
+
         mapOf(
           "width" to preparedWidth,
-          "height" to preparedHeight
+          "height" to preparedHeight,
+          "modelLoaded" to (segmenter != null),
+          "error" to loadError
         )
       }
     }
 
     AsyncFunction("segmentAsync") { positivePoints: List<Double>, negativePoints: List<Double> ->
       synchronized(lock) {
-        val segmenter = segmenter ?: throw SmartCutoutException(
-          "Akıllı kesim oturumu hazır değil.",
+        val bitmap = preparedBitmap ?: throw SmartCutoutException(
+          "Görsel akıllı kesim için hazırlanmadı.",
           null
         )
         if (preparedWidth <= 0 || preparedHeight <= 0) {
           throw SmartCutoutException("Görsel boyutu okunamadı.", null)
         }
+
+        // Model hazırlık sırasında yüklenemediyse burada bir kez daha dene.
+        if (segmenter == null) {
+          attachSegmenter(context(), bitmap)
+        }
+
+        val segmenter = segmenter ?: throw SmartCutoutException(
+          "Akıllı kesim modeli yüklenemedi: ${loadError ?: "bilinmeyen hata"}",
+          null
+        )
 
         // Her dokunuş/sürükleme ayrı bir vuruş olarak gönderilir; aksi halde
         // model iki uzak noktayı tek bir fırça çizgisi sanıp yanlış bölge seçer.
@@ -122,32 +129,71 @@ class SmartCutoutModule : Module() {
 
   private fun context(): Context = requireContext()
 
-  private fun createSegmenter(context: Context): InteractiveSegmenter {
-    // Modeli APK içindeki asset'ten belleğe okuyoruz. Böylece asset'in APK'da
-    // sıkıştırılmış olup olmaması fark etmez; `setModelAssetPath` bazı
-    // cihazlarda sıkıştırılmış varlıklarda başarısız olabiliyor.
-    val bytes = try {
-      context.assets.open(MODEL_ASSET).use { it.readBytes() }
-    } catch (error: Exception) {
-      throw SmartCutoutException("Akıllı kesim modeli okunamadı.", error)
+  /**
+   * Modeli yükler ve hazır görsele bağlar.
+   *
+   * Üç yol sırayla denenir; her biri farklı cihaz/APK yapılandırmasında
+   * çalışabildiği için biri düşerse diğerine geçilir. Hata mesajları
+   * birleştirilip `loadError` içinde tutulur, böylece kullanıcı gerçek nedeni
+   * görebilir.
+   *
+   *   1. `setModelAssetPath`: asset sıkıştırılmamışsa en verimli yol
+   *      (bellekte kopya yok).
+   *   2. Heap `ByteBuffer`: asset sıkıştırılmış olsa da çalışır.
+   *   3. Doğrudan (direct) `ByteBuffer`: heap kısıtlıysa son çare.
+   */
+  private fun attachSegmenter(context: Context, bitmap: Bitmap) {
+    val failures = ArrayList<String>(3)
+
+    val candidates: List<Pair<String, () -> BaseOptions>> = listOf(
+      "asset" to { BaseOptions.builder().setModelAssetPath(MODEL_ASSET).build() },
+      "buffer" to {
+        val bytes = context.assets.open(MODEL_ASSET).use { it.readBytes() }
+        BaseOptions.builder().setModelAssetBuffer(ByteBuffer.wrap(bytes)).build()
+      },
+      "direct" to {
+        val bytes = context.assets.open(MODEL_ASSET).use { it.readBytes() }
+        val buffer = ByteBuffer.allocateDirect(bytes.size)
+        buffer.put(bytes)
+        buffer.rewind()
+        BaseOptions.builder().setModelAssetBuffer(buffer).build()
+      }
+    )
+
+    for ((label, makeOptions) in candidates) {
+      var created: InteractiveSegmenter? = null
+      try {
+        val options = InteractiveSegmenterOptions.builder()
+          .setBaseOptions(makeOptions())
+          .build()
+        val instance = InteractiveSegmenter.createFromOptions(context, options)
+        created = instance
+
+        val image = BitmapImageBuilder(bitmap).build()
+        instance.setImage(image)
+
+        // Önceki görseli serbest bırak, yenisiyle değiştir.
+        preparedImage?.let { runCatching { it.close() } }
+        preparedImage = image
+        segmenter = instance
+        loadError = null
+        return
+      } catch (error: Throwable) {
+        runCatching { created?.close() }
+        failures.add("$label: ${describe(error)}")
+      }
     }
 
-    val buffer = java.nio.ByteBuffer.allocateDirect(bytes.size)
-    buffer.put(bytes)
-    buffer.rewind()
+    loadError = failures.joinToString(" | ")
+    segmenter = null
+  }
 
-    val baseOptions = BaseOptions.builder()
-      .setModelAssetBuffer(buffer)
-      .build()
-
-    val options = InteractiveSegmenterOptions.builder()
-      .setBaseOptions(baseOptions)
-      .build()
-
-    return try {
-      InteractiveSegmenter.createFromOptions(context, options)
-    } catch (error: Exception) {
-      throw SmartCutoutException("Akıllı kesim modeli yüklenemedi.", error)
+  private fun describe(error: Throwable): String {
+    val message = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+    return if (error.cause != null && error.cause !== error) {
+      "$message (${describe(error.cause!!)})"
+    } else {
+      message
     }
   }
 
@@ -540,6 +586,7 @@ class SmartCutoutModule : Module() {
   private fun releaseSession() {
     segmenter?.let { runCatching { it.close() } }
     segmenter = null
+    loadError = null
 
     preparedImage?.let { runCatching { it.close() } }
     preparedImage = null

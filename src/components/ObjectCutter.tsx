@@ -333,9 +333,22 @@ export function ObjectCutter({
       const promise = prepareSmartCutout(imageUri);
       prepareRef.current = promise;
       try {
-        await promise;
+        const session = await promise;
+        if (!cancelled) {
+          // Model yüklenemediyse nedenini hemen göster; kullanıcı ilk
+          // dokunuştan önce durumu bilsin.
+          if (!session.modelLoaded) {
+            setSmartEngine('fallback');
+            setSmartNote(session.error ?? 'model yüklenemedi');
+            console.warn('[StickerCam] Akıllı kesim modeli yüklenemedi:', session.error);
+          } else {
+            setSmartEngine('model');
+            setSmartNote(null);
+          }
+        }
       } catch (error) {
         if (!cancelled) {
+          setSmartEngine('fallback');
           setSmartNote(errorMessage(error));
         }
         console.warn('[StickerCam] Akıllı kesim modeli hazırlanamadı', error);
@@ -1078,7 +1091,7 @@ export function ObjectCutter({
         <Text style={styles.instruction}>{instruction}</Text>
 
         {mode === 'ai' ? (
-          <Text style={styles.engine}>
+          <Text style={styles.engine} numberOfLines={2}>
             {smartPreparing
               ? 'Akıllı model hazırlanıyor…'
               : smartEngine === 'model'
