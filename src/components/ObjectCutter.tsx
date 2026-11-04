@@ -335,15 +335,21 @@ export function ObjectCutter({
       try {
         const session = await promise;
         if (!cancelled) {
-          // Model yüklenemediyse nedenini hemen göster; kullanıcı ilk
-          // dokunuştan önce durumu bilsin.
+          // Model yüklenemediyse ya da deneme segmentasyonu düştüyse nedenini
+          // hemen göster; kullanıcı ilk dokunuştan önce durumu bilsin.
           if (!session.modelLoaded) {
             setSmartEngine('fallback');
             setSmartNote(session.error ?? 'model yüklenemedi');
             console.warn('[StickerCam] Akıllı kesim modeli yüklenemedi:', session.error);
+          } else if (session.selfTest) {
+            setSmartEngine('fallback');
+            setSmartNote(`model çalışmadı: ${session.selfTest}`);
+            console.warn('[StickerCam] Model yüklendi ama segmentasyon başarısız:', session.selfTest);
           } else {
             setSmartEngine('model');
-            setSmartNote(null);
+            setSmartNote(
+              session.engine === 'magictouch-legacy' ? 'uyumluluk motoru' : null,
+            );
           }
         }
       } catch (error) {
@@ -1095,7 +1101,7 @@ export function ObjectCutter({
             {smartPreparing
               ? 'Akıllı model hazırlanıyor…'
               : smartEngine === 'model'
-                ? 'MagicTouch modeli · çevrimdışı'
+                ? `MagicTouch modeli · çevrimdışı${smartNote ? ` · ${smartNote}` : ''}`
                 : smartEngine === 'fallback'
                   ? `Yedek algoritma${smartNote ? ` · ${smartNote}` : ''}`
                   : 'Dokunmaya hazır'}

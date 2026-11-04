@@ -21,6 +21,13 @@ export type SmartCutoutSession = {
   modelLoaded: boolean;
   /** Model yüklenemediyse nedeni. */
   error: string | null;
+  /** Hazırlıkta çalıştırılan deneme segmentasyonunun hatası (yoksa null). */
+  selfTest: string | null;
+  /**
+   * Kullanılan motor: `magictouch` (vuruş tabanlı, ekle/çıkar destekli) veya
+   * `magictouch-legacy` (uyumluluk motoru, nokta tabanlı) ya da `yok`.
+   */
+  engine: string;
 };
 
 export function isNativeSmartCutoutAvailable(): boolean {

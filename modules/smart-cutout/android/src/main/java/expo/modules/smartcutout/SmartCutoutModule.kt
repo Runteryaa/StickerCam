@@ -13,6 +13,7 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.interactivesegmenter.InteractiveSegmenter
 import com.google.mediapipe.tasks.vision.interactivesegmenter.InteractiveSegmenterOptions
 import com.google.mediapipe.tasks.vision.interactivesegmenter.Stroke
+import com.google.mediapipe.tasks.vision.interactivesegmenterlegacy.InteractiveSegmenterLegacy
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -36,15 +37,33 @@ import kotlin.math.roundToInt
  * maskedir. JS tarafı bu maskeyi orijinal görsele `DstIn` ile uygular.
  */
 class SmartCutoutModule : Module() {
+  /**
+   * Hangi akıllı kesim motorunun kullanıldığını belirtir.
+   *
+   * MediaPipe iki API sunuyor: durumlu (stateful) yeni `InteractiveSegmenter`
+   * ve tek seferlik `InteractiveSegmenterLegacy`. Yeni API bazı cihaz/sürüm
+   * birleşimlerinde grafiği çalıştıramıyor; o durumda sessizce yedeğe geçiyoruz
+   * ki kullanıcı hiçbir zaman "çalışmıyor" durumunda kalmasın.
+   */
+  private enum class Engine(val label: String) {
+    NONE("yok"),
+    STROKE("magictouch"),
+    LEGACY("magictouch-legacy")
+  }
+
   private val lock = Any()
 
-  private var segmenter: InteractiveSegmenter? = null
+  private var engine = Engine.NONE
+  private var strokeSegmenter: InteractiveSegmenter? = null
+  private var legacySegmenter: InteractiveSegmenterLegacy? = null
   private var preparedBitmap: Bitmap? = null
   private var preparedImage: MPImage? = null
   private var preparedWidth = 0
   private var preparedHeight = 0
-  /** Model yüklenemediyse nedeni; kullanıcıya gösterilir. */
+  /** Hiçbir motor yüklenemediyse nedeni; kullanıcıya gösterilir. */
   private var loadError: String? = null
+  /** Model yüklendiği halde deneme segmentasyonu düştüyse nedeni. */
+  private var selfTestError: String? = null
 
   override fun definition() = ModuleDefinition {
     Name("SmartCutout")
@@ -59,16 +78,17 @@ class SmartCutoutModule : Module() {
         preparedWidth = bitmap.width
         preparedHeight = bitmap.height
 
-        // Modeli şimdi yüklemeye çalışıyoruz. Başarısız olursa görseli
-        // bırakıp ilk dokunuşta tekrar deniyoruz: bazı cihazlarda ilk deneme
-        // bellek baskısı yüzünden düşebiliyor.
-        attachSegmenter(context, bitmap)
+        // Modeli şimdi yüklemeye çalışıyoruz. Yüklenemezse görsel bellekte
+        // kalır ve ilk dokunuşta bir kez daha denenir.
+        loadEngine(context, bitmap)
 
         mapOf(
           "width" to preparedWidth,
           "height" to preparedHeight,
-          "modelLoaded" to (segmenter != null),
-          "error" to loadError
+          "modelLoaded" to (engine != Engine.NONE),
+          "engine" to engine.label,
+          "error" to loadError,
+          "selfTest" to selfTestError
         )
       }
     }
@@ -84,33 +104,66 @@ class SmartCutoutModule : Module() {
         }
 
         // Model hazırlık sırasında yüklenemediyse burada bir kez daha dene.
-        if (segmenter == null) {
-          attachSegmenter(context(), bitmap)
+        if (engine == Engine.NONE) {
+          loadEngine(context(), bitmap)
         }
-
-        val segmenter = segmenter ?: throw SmartCutoutException(
-          "Akıllı kesim modeli yüklenemedi: ${loadError ?: "bilinmeyen hata"}",
-          null
-        )
 
         // Her dokunuş/sürükleme ayrı bir vuruş olarak gönderilir; aksi halde
         // model iki uzak noktayı tek bir fırça çizgisi sanıp yanlış bölge seçer.
-        val strokes = ArrayList<Stroke>(4)
-        strokes.addAll(toStrokes(positivePoints, Stroke.BrushMode.POSITIVE))
-        strokes.addAll(toStrokes(negativePoints, Stroke.BrushMode.NEGATIVE))
+        val positiveStrokes = toStrokes(positivePoints, Stroke.BrushMode.POSITIVE)
+        val negativeStrokes = toStrokes(negativePoints, Stroke.BrushMode.NEGATIVE)
 
-        if (strokes.isEmpty()) {
+        if (positiveStrokes.isEmpty()) {
           throw SmartCutoutException("Seçim için en az bir nokta gerekli.", null)
         }
 
-        val maskImage = try {
-          segmenter.segment(strokes)
-        } catch (error: Exception) {
-          throw SmartCutoutException("Akıllı kesim çalıştırılamadı.", error)
+        val negativeTaps = toTaps(negativePoints)
+        val context = context()
+
+        val maskImage = when (engine) {
+          Engine.STROKE -> {
+            val segmenter = strokeSegmenter ?: throw SmartCutoutException(
+              "Akıllı kesim oturumu hazır değil.",
+              null
+            )
+            segment(segmenter, positiveStrokes + negativeStrokes)
+          }
+
+          Engine.LEGACY -> {
+            val segmenter = legacySegmenter ?: throw SmartCutoutException(
+              "Akıllı kesim oturumu hazır değil.",
+              null
+            )
+            val image = preparedImage ?: BitmapImageBuilder(bitmap).build()
+            val keypoints = sampleKeypoints(positiveStrokes.flatMap { it.points() })
+            val result = try {
+              segmenter.segment(
+                image,
+                InteractiveSegmenterLegacy.RegionOfInterest.create(keypoints)
+              )
+            } catch (error: Throwable) {
+              throw SmartCutoutException(
+                "Akıllı kesim çalıştırılamadı: ${describe(error)}",
+                error
+              )
+            }
+            val confidenceMasks = result.confidenceMasks()
+            val mask = if (confidenceMasks.isPresent) {
+              confidenceMasks.get().firstOrNull()
+            } else {
+              null
+            }
+            mask ?: throw SmartCutoutException("Akıllı kesim maskesi boş döndü.", null)
+          }
+
+          Engine.NONE -> throw SmartCutoutException(
+            "Akıllı kesim modeli yüklenemedi: ${loadError ?: selfTestError ?: "bilinmeyen hata"}",
+            null
+          )
         }
 
         try {
-          writeMask(context(), maskImage)
+          writeMask(context, maskImage, negativeTaps)
         } finally {
           runCatching { maskImage.close() }
         }
@@ -130,22 +183,164 @@ class SmartCutoutModule : Module() {
   private fun context(): Context = requireContext()
 
   /**
-   * Modeli yükler ve hazır görsele bağlar.
+   * Segmentasyonu çalıştırır.
    *
-   * Üç yol sırayla denenir; her biri farklı cihaz/APK yapılandırmasında
-   * çalışabildiği için biri düşerse diğerine geçilir. Hata mesajları
-   * birleştirilip `loadError` içinde tutulur, böylece kullanıcı gerçek nedeni
-   * görebilir.
+   * Bazı MediaPipe sürümleri tek noktalı (dokunma) vuruşlarda grafiği
+   * çalıştıramıyor. Böyle bir durumda dokunuşu çok küçük iki noktalı bir
+   * vuruşa çevirip bir kez daha deniyoruz; tek nokta bilgisi (dokunulan yer)
+   * aynı kaldığı için sonuç değişmiyor.
+   */
+  private fun segment(segmenter: InteractiveSegmenter, strokes: List<Stroke>): MPImage {
+    try {
+      return segmenter.segment(strokes)
+    } catch (first: Throwable) {
+      val canPad = strokes.any { it.points().size < 2 }
+      if (canPad) {
+        try {
+          return segmenter.segment(strokes.map { padStroke(it) })
+        } catch (second: Throwable) {
+          throw SmartCutoutException(
+            "Akıllı kesim çalıştırılamadı: ${describe(first)}",
+            second
+          )
+        }
+      }
+      throw SmartCutoutException(
+        "Akıllı kesim çalıştırılamadı: ${describe(first)}",
+        first
+      )
+    }
+  }
+
+  /** Tek noktalı vuruşu, aynı yeri hedefleyen iki noktalı vuruşa çevirir. */
+  private fun padStroke(stroke: Stroke): Stroke {
+    val points = stroke.points()
+    if (points.size >= 2) {
+      return stroke
+    }
+    val only = points.firstOrNull() ?: return stroke
+    val x = only.x()
+    val y = only.y()
+    val nudged = NormalizedKeypoint.create(
+      (x + 0.004f).coerceIn(0f, 1f),
+      (y + 0.004f).coerceIn(0f, 1f)
+    )
+    return Stroke.builder()
+      .setBrushMode(stroke.brushMode())
+      .setPoints(listOf(only, nudged))
+      .setCompleted(true)
+      .build()
+  }
+
+  /** Hazırlık aşamasındaki deneme segmentasyonu için vuruş. */
+  private fun syntheticStroke(): Stroke = Stroke.builder()
+    .setBrushMode(Stroke.BrushMode.POSITIVE)
+    .setPoints(
+      listOf(
+        NormalizedKeypoint.create(0.5f, 0.5f),
+        NormalizedKeypoint.create(0.504f, 0.504f)
+      )
+    )
+    .setCompleted(true)
+    .build()
+
+  /**
+   * Modeli yüklemeye çalışır; başarılı olursa `engine` ayarlanır.
    *
-   *   1. `setModelAssetPath`: asset sıkıştırılmamışsa en verimli yol
-   *      (bellekte kopya yok).
+   * Sıra:
+   *   1. Durumlu (yeni) `InteractiveSegmenter` API'si denenir ve bir deneme
+   *      segmentasyonu çalıştırılır. Bu API bazı cihaz/sürüm birleşimlerinde
+   *      grafiği çalıştıramıyor; o zaman sessizce aşağıdaki yedeğe geçilir.
+   *   2. `InteractiveSegmenterLegacy` (tek seferlik API) denenir. Aynı modeli
+   *      kullanır, yalnızca pozitif noktalarla çalışır.
+   *   3. İkisi de olmazsa `loadError`/`selfTestError` gerçek nedenleri toplar.
+   */
+  private fun loadEngine(context: Context, bitmap: Bitmap) {
+    releaseEngines()
+    loadError = null
+    selfTestError = null
+
+    val failures = ArrayList<String>(4)
+
+    // --- 1) Durumlu / vuruş tabanlı API -------------------------------------
+    val stroke = createStrokeSegmenter(context, failures)
+
+    if (stroke != null) {
+      var image: MPImage? = null
+      try {
+        val mpImage = BitmapImageBuilder(bitmap).build()
+        image = mpImage
+        stroke.setImage(mpImage)
+
+        // Deneme segmentasyonu: model gerçekten çalışıyor mu?
+        val probe = stroke.segment(listOf(syntheticStroke()))
+          ?: throw IllegalStateException("segment() boş sonuç döndü")
+        runCatching { probe.close() }
+
+        preparedImage?.let { runCatching { it.close() } }
+        preparedImage = mpImage
+        strokeSegmenter = stroke
+        engine = Engine.STROKE
+        return
+      } catch (error: Throwable) {
+        runCatching { image?.close() }
+        runCatching { stroke.close() }
+        selfTestError = "vuruş: ${describe(error)}"
+        failures.add("vuruş: ${describe(error)}")
+      }
+    }
+
+    // --- 2) Tek seferlik (legacy) API ---------------------------------------
+    val legacy = createLegacySegmenter(context, failures)
+
+    if (legacy != null) {
+      val image = BitmapImageBuilder(bitmap).build()
+      try {
+        // Aynı deneme segmentasyonu: model gerçekten maske üretiyor mu?
+        val result = legacy.segment(
+          image,
+          InteractiveSegmenterLegacy.RegionOfInterest.create(
+            listOf(NormalizedKeypoint.create(0.5f, 0.5f))
+          )
+        )
+        val masks = result.confidenceMasks()
+        val probe = if (masks.isPresent) masks.get().firstOrNull() else null
+        if (probe == null) {
+          throw IllegalStateException("segment() boş sonuç döndü")
+        }
+        runCatching { probe.close() }
+
+        preparedImage?.let { runCatching { it.close() } }
+        preparedImage = image
+        legacySegmenter = legacy
+        engine = Engine.LEGACY
+        return
+      } catch (error: Throwable) {
+        runCatching { image.close() }
+        runCatching { legacy.close() }
+        selfTestError = listOfNotNull(
+          selfTestError,
+          "legacy: ${describe(error)}"
+        ).joinToString(" | ")
+        failures.add("legacy: ${describe(error)}")
+      }
+    }
+
+    engine = Engine.NONE
+    loadError = failures.joinToString(" | ")
+  }
+
+  /**
+   * Model dosyasını açmanın üç yolu.
+   *
+   * Her biri farklı cihaz/APK yapılandırmasında çalışabildiği için sırayla
+   * denenir:
+   *   1. `setModelAssetPath`: asset sıkıştırılmamışsa en verimli yol.
    *   2. Heap `ByteBuffer`: asset sıkıştırılmış olsa da çalışır.
    *   3. Doğrudan (direct) `ByteBuffer`: heap kısıtlıysa son çare.
    */
-  private fun attachSegmenter(context: Context, bitmap: Bitmap) {
-    val failures = ArrayList<String>(3)
-
-    val candidates: List<Pair<String, () -> BaseOptions>> = listOf(
+  private fun baseOptionStrategies(context: Context): List<Pair<String, () -> BaseOptions>> =
+    listOf(
       "asset" to { BaseOptions.builder().setModelAssetPath(MODEL_ASSET).build() },
       "buffer" to {
         val bytes = context.assets.open(MODEL_ASSET).use { it.readBytes() }
@@ -160,32 +355,72 @@ class SmartCutoutModule : Module() {
       }
     )
 
-    for ((label, makeOptions) in candidates) {
-      var created: InteractiveSegmenter? = null
+  /** Yeni (durumlu) API için model oluşturur; olmazsa hata metinlerini toplar. */
+  private fun createStrokeSegmenter(
+    context: Context,
+    failures: MutableList<String>
+  ): InteractiveSegmenter? {
+    for ((label, makeOptions) in baseOptionStrategies(context)) {
       try {
-        val options = InteractiveSegmenterOptions.builder()
-          .setBaseOptions(makeOptions())
-          .build()
-        val instance = InteractiveSegmenter.createFromOptions(context, options)
-        created = instance
-
-        val image = BitmapImageBuilder(bitmap).build()
-        instance.setImage(image)
-
-        // Önceki görseli serbest bırak, yenisiyle değiştir.
-        preparedImage?.let { runCatching { it.close() } }
-        preparedImage = image
-        segmenter = instance
-        loadError = null
-        return
+        return InteractiveSegmenter.createFromOptions(
+          context,
+          InteractiveSegmenterOptions.builder().setBaseOptions(makeOptions()).build()
+        )
       } catch (error: Throwable) {
-        runCatching { created?.close() }
-        failures.add("$label: ${describe(error)}")
+        failures.add("vuruş/$label: ${describe(error)}")
       }
     }
+    return null
+  }
 
-    loadError = failures.joinToString(" | ")
-    segmenter = null
+  /** Legacy API için model oluşturur; olmazsa hata metinlerini toplar. */
+  private fun createLegacySegmenter(
+    context: Context,
+    failures: MutableList<String>
+  ): InteractiveSegmenterLegacy? {
+    for ((label, makeOptions) in baseOptionStrategies(context)) {
+      try {
+        return InteractiveSegmenterLegacy.createFromOptions(
+          context,
+          InteractiveSegmenterLegacy.InteractiveSegmenterLegacyOptions.builder()
+            .setBaseOptions(makeOptions())
+            .setOutputConfidenceMasks(true)
+            .build()
+        )
+      } catch (error: Throwable) {
+        failures.add("legacy/$label: ${describe(error)}")
+      }
+    }
+    return null
+  }
+
+  /** Legacy API'ye gönderilecek nokta sayısını sınırlar. */
+  private fun sampleKeypoints(
+    points: List<NormalizedKeypoint>,
+    limit: Int = 8
+  ): List<NormalizedKeypoint> {
+    if (points.size <= limit) {
+      return points
+    }
+    val step = (points.size - 1).toDouble() / (limit - 1)
+    return (0 until limit).map { points[(it * step).roundToInt()] }
+  }
+
+  /** Negatif dokunuşları normalize koordinat çiftlerine çevirir. */
+  private fun toTaps(points: List<Double>): List<Pair<Float, Float>> {
+    val taps = ArrayList<Pair<Float, Float>>()
+    var index = 0
+    while (index + 1 < points.size) {
+      val x = points[index]
+      val y = points[index + 1]
+      if (x >= 0 && y >= 0) {
+        taps.add(
+          x.toFloat().coerceIn(0f, 1f) to y.toFloat().coerceIn(0f, 1f)
+        )
+      }
+      index += 2
+    }
+    return taps
   }
 
   private fun describe(error: Throwable): String {
@@ -254,7 +489,10 @@ class SmartCutoutModule : Module() {
    * Bu yüzden ham maske `refineMask` ile temizlenir: küçük yarıklar kapatılır ve
    * nesnenin içinde kalan delikler doldurulur.
    */
-  private fun confidenceBitmap(mask: MPImage): Bitmap {
+  private fun confidenceBitmap(
+    mask: MPImage,
+    negativeTaps: List<Pair<Float, Float>> = emptyList()
+  ): Bitmap {
     val width = mask.width
     val height = mask.height
     if (width <= 0 || height <= 0) {
@@ -264,6 +502,10 @@ class SmartCutoutModule : Module() {
     val confidence = readFloatMask(mask, width, height)
     if (confidence != null) {
       val raw = IntArray(width * height) { smoothAlpha(confidence[it]) }
+      // Legacy motor negatif noktaları modele veremiyor; çıkarma burada yapılır.
+      if (negativeTaps.isNotEmpty() && engine == Engine.LEGACY) {
+        subtractNegativeRegions(preparedBitmap, raw, width, height, negativeTaps)
+      }
       val refined = refineMask(raw, width, height)
       val pixels = IntArray(width * height)
       for (index in pixels.indices) {
@@ -297,6 +539,86 @@ class SmartCutoutModule : Module() {
       extracted.recycle()
     }
     return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+  }
+
+  /**
+   * Negatif dokunuşları maskeden çıkarır.
+   *
+   * Yalnızca legacy motorda gerekir: yeni API negatif vuruşları modele ilettiği
+   * için orada bu iş yapılmaz. Dokunulan noktadan başlayan renk benzerliğine
+   * dayalı bağlı bölge silinir; böylece "Çıkar" düğmesi iki motorda da çalışır.
+   */
+  private fun subtractNegativeRegions(
+    source: Bitmap?,
+    alpha: IntArray,
+    width: Int,
+    height: Int,
+    taps: List<Pair<Float, Float>>
+  ) {
+    if (source == null || source.isRecycled) {
+      return
+    }
+    if (source.width != width || source.height != height) {
+      return
+    }
+
+    val pixels = IntArray(width * height)
+    source.getPixels(pixels, 0, width, 0, 0, width, height)
+
+    val visited = BooleanArray(width * height)
+    val queue = IntArray(width * height)
+    val toleranceSq = 42 * 42
+
+    for ((nx, ny) in taps.take(4)) {
+      val seedX = (nx * width).roundToInt().coerceIn(0, width - 1)
+      val seedY = (ny * height).roundToInt().coerceIn(0, height - 1)
+      val seed = seedY * width + seedX
+      if (alpha[seed] <= 0 || visited[seed]) {
+        continue
+      }
+
+      val target = pixels[seed]
+      val tr = Color.red(target)
+      val tg = Color.green(target)
+      val tb = Color.blue(target)
+
+      var head = 0
+      var tail = 0
+      visited[seed] = true
+      queue[tail++] = seed
+
+      while (head < tail) {
+        val index = queue[head++]
+        alpha[index] = 0
+
+        val x = index % width
+        val y = index / width
+
+        fun push(nextX: Int, nextY: Int) {
+          if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) {
+            return
+          }
+          val next = nextY * width + nextX
+          if (visited[next] || alpha[next] <= 0) {
+            return
+          }
+          val pixel = pixels[next]
+          val dr = Color.red(pixel) - tr
+          val dg = Color.green(pixel) - tg
+          val db = Color.blue(pixel) - tb
+          if (dr * dr + dg * dg + db * db > toleranceSq) {
+            return
+          }
+          visited[next] = true
+          queue[tail++] = next
+        }
+
+        push(x - 1, y)
+        push(x + 1, y)
+        push(x, y - 1)
+        push(x, y + 1)
+      }
+    }
   }
 
   /**
@@ -487,8 +809,12 @@ class SmartCutoutModule : Module() {
     return out
   }
 
-  private fun writeMask(context: Context, mask: MPImage): Map<String, Any?> {
-    val bitmap = confidenceBitmap(mask)
+  private fun writeMask(
+    context: Context,
+    mask: MPImage,
+    negativeTaps: List<Pair<Float, Float>>
+  ): Map<String, Any?> {
+    val bitmap = confidenceBitmap(mask, negativeTaps)
     val scaled = if (bitmap.width == preparedWidth && bitmap.height == preparedHeight) {
       bitmap
     } else {
@@ -584,9 +910,9 @@ class SmartCutoutModule : Module() {
   }
 
   private fun releaseSession() {
-    segmenter?.let { runCatching { it.close() } }
-    segmenter = null
+    releaseEngines()
     loadError = null
+    selfTestError = null
 
     preparedImage?.let { runCatching { it.close() } }
     preparedImage = null
@@ -600,6 +926,17 @@ class SmartCutoutModule : Module() {
 
     preparedWidth = 0
     preparedHeight = 0
+  }
+
+  /** Yalnızca motorları kapatır; hazırlanmış görseli korur. */
+  private fun releaseEngines() {
+    strokeSegmenter?.let { runCatching { it.close() } }
+    strokeSegmenter = null
+
+    legacySegmenter?.let { runCatching { it.close() } }
+    legacySegmenter = null
+
+    engine = Engine.NONE
   }
 
   companion object {

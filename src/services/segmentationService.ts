@@ -55,6 +55,45 @@ export type SegmentationProvider = {
   segment: (request: SmartSelectionRequest) => Promise<SmartMaskResult>;
 };
 
+/**
+ * Hata metnini, zincirdeki nedenleriyle birlikte tek satıra indirger.
+ *
+ * Expo native modülleri gerçek nedeni `cause` alanına koyduğu için yalnızca
+ * `message` okumak "call to function ... has been rejected" gibi faydasız bir
+ * metin bırakıyor.
+ */
+export function describeError(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  let depth = 0;
+
+  while (current && depth < 4) {
+    if (current instanceof Error) {
+      const code = (current as { code?: unknown }).code;
+      const text = current.message?.trim();
+      if (text) {
+        parts.push(text);
+      }
+      if (typeof code === 'string' && code && !parts.some((part) => part.includes(code))) {
+        parts.push(`[${code}]`);
+      }
+      current = (current as { cause?: unknown }).cause;
+    } else if (typeof current === 'string' && current.trim()) {
+      parts.push(current.trim());
+      break;
+    } else {
+      break;
+    }
+    depth += 1;
+  }
+
+  const unique = parts.filter(
+    (part, index) => part.length > 0 && parts.indexOf(part) === index,
+  );
+
+  return unique.length > 0 ? unique.join(' → ') : 'Bilinmeyen hata';
+}
+
 export class SegmentationError extends Error {
   readonly code: 'unavailable' | 'failed';
 
@@ -591,7 +630,7 @@ export async function segmentMask(
       return note ? { ...result, note } : result;
     } catch (error) {
       lastError = error;
-      note = error instanceof Error ? error.message : String(error);
+      note = describeError(error);
       console.warn(`[StickerCam] ${provider.id} segmentasyonu başarısız:`, error);
     }
   }
