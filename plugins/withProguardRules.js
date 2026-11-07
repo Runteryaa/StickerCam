@@ -1,16 +1,21 @@
-const { withDangerousMod } = require('expo/config-plugins');
+const { withDangerousMod, withGradleProperties } = require('expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
 /**
  * Release derlemesindeki R8, MediaPipe'ın reflection ile okuduğu proto
- * alanlarını yeniden adlandırınca akıllı kesim çalışma anında
- * "Field runAsync_ for q14 not found" hatası veriyor.
+ * alanlarını ve statik başlatıcılarını bozuyor:
  *
- * `modules/smart-cutout/consumer-rules.pro` bu kuralları zaten taşıyor; burada
- * ayrıca uygulama seviyesindeki `app/proguard-rules.pro` dosyasına da ekliyoruz
- * ki kütüphane consumer kuralları herhangi bir nedenle uygulanmazsa da
- * derleme bozulmasın.
+ *   - "Field runAsync_ for q14 not found"                       (minify açıkken)
+ *   - "ExceptionInInitializerError ... no caller found ... v13" (keep kurallarına rağmen)
+ *   - "The model buffer should be either a direct ByteBuffer..." (aynı kök neden)
+ *
+ * Bu sınıfları tek tek korumak kırılgan: MediaPipe'ın JNI + protobuf-lite
+ * kombinasyonu R8'in varsayımlarıyla uyuşmuyor. APK boyutu bu projede öncelik
+ * olmadığı için release derlemesinde kod küçültmeyi tamamen kapatıyoruz.
+ *
+ * `app/build.gradle` bu değeri `findProperty` ile okuyor, yani
+ * `gradle.properties` içindeki `android.enableMinifyInReleaseBuilds` yeterli.
  */
 
 const MARKER = '# StickerCam: MediaPipe reflection korumasi';
@@ -37,7 +42,29 @@ const RULES = [
   '',
 ].join('\n');
 
-function withProguardRules(config) {
+/** Release derlemesinde R8'i kapatır. */
+function withMinifyDisabled(config) {
+  return withGradleProperties(config, (gradleConfig) => {
+    const properties = gradleConfig.modResults;
+    const key = 'android.enableMinifyInReleaseBuilds';
+
+    for (let index = properties.length - 1; index >= 0; index -= 1) {
+      const entry = properties[index];
+      if (entry.type === 'property' && entry.key === key) {
+        properties.splice(index, 1);
+      }
+    }
+
+    properties.push({ type: 'property', key, value: 'false' });
+    return gradleConfig;
+  });
+}
+
+/**
+ * Minify kapalı olsa da emniyet kemeri olarak keep kurallarını da yazarız;
+ * ileride biri minify'ı açarsa akıllı kesim sessizce bozulmasın.
+ */
+function withProguardRulesFile(config) {
   return withDangerousMod(config, [
     'android',
     async (modConfig) => {
@@ -59,15 +86,13 @@ function withProguardRules(config) {
       }
 
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(
-        file,
-        `${contents.trimEnd()}\n\n${RULES}`,
-        'utf8',
-      );
+      fs.writeFileSync(file, `${contents.trimEnd()}\n\n${RULES}`, 'utf8');
 
       return modConfig;
     },
   ]);
 }
 
-module.exports = withProguardRules;
+module.exports = function withProguardRules(config) {
+  return withProguardRulesFile(withMinifyDisabled(config));
+};
