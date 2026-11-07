@@ -2,7 +2,7 @@
 
 Kamera veya galeriden bir fotoğraf seç, istediğin nesnenin etrafını çiz (veya akıllı
 seçimle dokun) ve geriye şeffaf, beyaz konturlu bir sticker kalsın. Sticker'lar
-cihazda birikir; sonraki fazda damalı kağıt sayfalara otomatik yerleştirilecek.
+cihazda, adlandırdığın defter sayfalarında birikir.
 
 Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanimated
 
@@ -47,7 +47,16 @@ Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanima
 - **Kalıcılık**: sticker PNG'leri `document/stickers/` altında, metadata
   `stickers/index.json` manifestinde. Önizleme onaylanmadan dosya kalıcı dizine
   taşınmaz; vazgeçilen taslaklar cache'ten silinir.
-- **Defter (sticker tepsisi)**: ana ekranda grid, önizleme, silme, canlı sayaç.
+- **Defter sayfaları**: ana ekran, sayfaların 2 sütunlu kart ızgarasıdır; her
+  kartta sayfanın ilk dört sticker'ı kapak olarak görünür ve yeni kesimlerin
+  gideceği sayfa “AKTİF” rozetiyle işaretlenir. Sayfayı açınca sticker ızgarası,
+  önizleme, paylaşma ve silme; başlıktaki kalemle yeniden adlandırma; çöp
+  kutusuyla sayfayı silme vardır. Sayfa silinince içindeki sticker'lar başka bir
+  sayfaya taşınır; tek sayfa kalırsa kullanıcı uyarılarak sticker'larla birlikte
+  silinir. Sayfa listesi `stickers/pages.json`, aktif sayfa
+  `stickers/active-page.json` dosyasında tutulur; sayfası olmayan eski
+  sticker'lar ilk sayfaya otomatik taşınır. Bir sayfadan kamera/galeri ile
+  başlatılan kesim kaydedilince aynı sayfaya dönülür.
 - **WhatsApp sticker paketi**: seçilen sticker'lar 512×512 şeffaf WebP'ye (≤100 KB)
   ve 96×96 tray ikonuna dönüştürülür, `document/whatsapp-packs/<id>/` altına
   yazılır. Paket, WhatsApp'ın beklediği `com.whatsapp.sticker.READ` izinli
@@ -55,6 +64,7 @@ Expo SDK 58 · React Native 0.88 · Expo Router · TypeScript · Skia · Reanima
   `com.whatsapp.intent.action.ENABLE_STICKER_PACK` niyetiyle ekleme ekranı açılır.
   Native provider `plugins/withWhatsAppStickers.js` config plugin'i ile üretilir;
   bu yüzden paket aktarımı **Expo Go'da çalışmaz**, derlenmiş APK gerekir.
+  Dışa aktarma ekranında sticker'lar sayfaya göre filtrelenebilir.
 - **Diğer uygulamalar**: önizlemedeki “Paylaş” aksiyonu sticker'ı şeffaf PNG
   olarak sistem paylaşım menüsüne verir (Instagram, TikTok, mesaj uygulamaları).
 - **Paylaşımdan içe alma**: Android paylaşım menüsünde StickerCam görünür

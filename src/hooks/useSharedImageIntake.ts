@@ -2,7 +2,7 @@ import { usePathname, useRootNavigationState, router } from 'expo-router';
 import { useCallback, useEffect, useRef } from 'react';
 
 import { preparePhoto } from '@/services/imageService';
-import { setPendingPhoto } from '@/services/photoSession';
+import { setEditorOriginPage, setPendingPhoto } from '@/services/photoSession';
 import { consumeSharedImages, subscribeToSharedImages } from '@/services/sharedImageService';
 import { withTimeout } from '@/utils/withTimeout';
 
@@ -45,6 +45,7 @@ export function useSharedImageIntake(): void {
         'Paylaşılan görsel işlenemedi.',
       );
 
+      setEditorOriginPage(null);
       setPendingPhoto({
         uri: prepared.uri,
         source: 'share',

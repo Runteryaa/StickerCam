@@ -8,6 +8,7 @@ import { ObjectCutter } from '@/components/ObjectCutter';
 import { Colors, Fonts, Spacing } from '@/constants/theme';
 import {
   clearPendingPhoto,
+  getEditorOriginPage,
   getPendingPhoto,
   subscribePendingPhoto,
 } from '@/services/photoSession';
@@ -58,6 +59,12 @@ export default function EditorScreen() {
         }}
         onSaved={() => {
           clearPendingPhoto();
+          // Kullanıcı bir sayfa ekranından geldiyse oraya, aksi halde deftere dön.
+          const originPageId = getEditorOriginPage();
+          if (originPageId) {
+            router.dismissTo({ pathname: '/page/[id]', params: { id: originPageId } });
+            return;
+          }
           router.dismissTo('/');
         }}
       />

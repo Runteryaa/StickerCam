@@ -3,18 +3,15 @@ import { router, useFocusEffect } from 'expo-router';
 import {
   Camera,
   Images,
-  Layers,
-  Share2,
-  Sparkles,
+  Pencil,
+  Plus,
   Send,
-  Trash2,
-  X,
+  Sparkles,
 } from 'lucide-react-native';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   Alert,
   FlatList,
-  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -23,27 +20,36 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/ActionButton';
-import { TransparencyPreview } from '@/components/TransparencyPreview';
+import { NameDialog } from '@/components/NameDialog';
 import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
 import { usePhotoPicker } from '@/hooks/usePhotoPicker';
-import { shareStickerImage } from '@/services/shareService';
+import { setEditorOriginPage } from '@/services/photoSession';
 import {
-  deleteSticker,
-  listStickers,
-  type StickerRecord,
+  createPage,
+  deletePage,
+  getActivePageId,
+  loadLibrary,
+  renamePage,
+  setActivePageId,
+  suggestPageName,
+  type PageWithStickers,
 } from '@/services/stickerService';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
-  const [stickers, setStickers] = useState<StickerRecord[]>([]);
-  const [preview, setPreview] = useState<StickerRecord | null>(null);
+  const [library, setLibrary] = useState<PageWithStickers[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [renaming, setRenaming] = useState<PageWithStickers | null>(null);
   const { pickPhoto, picking } = usePhotoPicker();
 
   const refresh = useCallback(() => {
     try {
-      setStickers(listStickers());
+      const pages = loadLibrary();
+      setLibrary(pages);
+      setActiveId(getActivePageId());
     } catch {
-      setStickers([]);
+      setLibrary([]);
     }
   }, []);
 
@@ -53,55 +59,94 @@ export default function HomeScreen() {
     }, [refresh]),
   );
 
-  const confirmDelete = useCallback(
-    (sticker: StickerRecord) => {
-      Alert.alert(
-        'Sticker silinsin mi?',
-        'Bu kesim cihazdan kaldırılacak. Bu işlem geri alınamaz.',
-        [
-          { text: 'Vazgeç', style: 'cancel' },
-          {
-            text: 'Sil',
-            style: 'destructive',
-            onPress: () => {
-              deleteSticker(sticker.id);
-              refresh();
-            },
-          },
-        ],
-      );
+  const totalStickers = useMemo(
+    () => library.reduce((sum, entry) => sum + entry.stickers.length, 0),
+    [library],
+  );
+
+  const openCamera = useCallback(() => {
+    setEditorOriginPage(null);
+    router.push('/camera');
+  }, []);
+
+  const openPage = useCallback((pageId: string) => {
+    setActivePageId(pageId);
+    router.push({ pathname: '/page/[id]', params: { id: pageId } });
+  }, []);
+
+  const handleCreatePage = useCallback(
+    (name: string) => {
+      const page = createPage(name);
+      setCreating(false);
+      refresh();
+      router.push({ pathname: '/page/[id]', params: { id: page.id } });
     },
     [refresh],
   );
 
-  const openCamera = useCallback(() => {
-    router.push('/camera');
-  }, []);
+  const handleRename = useCallback(
+    (name: string) => {
+      if (!renaming) {
+        return;
+      }
+      renamePage(renaming.page.id, name);
+      setRenaming(null);
+      refresh();
+    },
+    [refresh, renaming],
+  );
 
-  const sharePreview = useCallback(async () => {
-    if (!preview) {
-      return;
-    }
-    try {
-      await shareStickerImage(preview.uri);
-    } catch (error) {
-      Alert.alert(
-        'Paylaşılamadı',
-        error instanceof Error && error.message
-          ? error.message
-          : 'Paylaşım menüsü açılamadı.',
-      );
-    }
-  }, [preview]);
+  const openPageOptions = useCallback(
+    (entry: PageWithStickers) => {
+      const count = entry.stickers.length;
+      Alert.alert(entry.page.name, `${count} sticker`, [
+        { text: 'Vazgeç', style: 'cancel' },
+        {
+          text: 'Yeniden adlandır',
+          onPress: () => setRenaming(entry),
+        },
+        {
+          text: 'Sayfayı sil',
+          style: 'destructive',
+          onPress: () => {
+            Alert.alert(
+              'Sayfa silinsin mi?',
+              count > 0
+                ? `İçindeki ${count} sticker başka bir sayfaya taşınacak; başka sayfa yoksa silinecek.`
+                : 'Bu sayfa silinecek.',
+              [
+                { text: 'Vazgeç', style: 'cancel' },
+                {
+                  text: 'Sil',
+                  style: 'destructive',
+                  onPress: () => {
+                    const result = deletePage(entry.page.id);
+                    if (result.deletedStickers > 0) {
+                      Alert.alert(
+                        'Sayfa silindi',
+                        `Başka sayfa olmadığı için ${result.deletedStickers} sticker da silindi.`,
+                      );
+                    }
+                    refresh();
+                  },
+                },
+              ],
+            );
+          },
+        },
+      ]);
+    },
+    [refresh],
+  );
 
   const header = (
     <View style={styles.header}>
       <View style={styles.topRow}>
         <Text style={styles.eyebrow}>STICKER SCRAPBOOK</Text>
         <View style={styles.countChip}>
-          <Layers size={12} color={Colors.inkSoft} strokeWidth={2} />
+          <Sparkles size={12} color={Colors.inkSoft} strokeWidth={2} />
           <Text style={styles.countText}>
-            {stickers.length} sticker
+            {totalStickers} sticker · {library.length} sayfa
           </Text>
         </View>
       </View>
@@ -110,8 +155,8 @@ export default function HomeScreen() {
         Kes, biriktir,{'\n'}sayfalara yapıştır.
       </Text>
       <Text style={styles.subtitle}>
-        Bir kare yakala, istediğin nesnenin etrafını çiz. StickerCam gerisini şeffaf
-        bir sticker’a dönüştürsün.
+        Her sticker bir defter sayfasına yapışır. Sayfalar arasında gez, koleksiyonunu
+        büyüt.
       </Text>
 
       <View style={styles.actions}>
@@ -126,22 +171,38 @@ export default function HomeScreen() {
           variant="secondary"
           loading={picking}
           icon={<Images size={19} color={Colors.ink} strokeWidth={2} />}
-          onPress={pickPhoto}
+          onPress={() => {
+            setEditorOriginPage(null);
+            pickPhoto();
+          }}
         />
-        <ActionButton
-          label="WhatsApp’a aktar"
-          variant="secondary"
-          icon={<Send size={19} color={Colors.ink} strokeWidth={2} />}
-          onPress={() => router.push('/export')}
-          accessibilityHint="Seçtiğin sticker'lardan WhatsApp sticker paketi oluşturur"
-        />
+        <View style={styles.secondaryRow}>
+          <ActionButton
+            label="Yeni sayfa"
+            variant="secondary"
+            compact
+            style={styles.flex}
+            icon={<Plus size={17} color={Colors.ink} strokeWidth={2} />}
+            onPress={() => setCreating(true)}
+            accessibilityHint="Koleksiyona boş bir sayfa ekler"
+          />
+          <ActionButton
+            label="WhatsApp’a aktar"
+            variant="secondary"
+            compact
+            style={styles.flex}
+            icon={<Send size={16} color={Colors.ink} strokeWidth={2} />}
+            onPress={() => router.push('/export')}
+            accessibilityHint="Seçtiğin sticker'lardan WhatsApp sticker paketi oluşturur"
+          />
+        </View>
       </View>
 
       <View style={styles.sectionHeader}>
         <View>
-          <Text style={styles.sectionTitle}>Sticker’ların</Text>
+          <Text style={styles.sectionTitle}>Sayfaların</Text>
           <Text style={styles.sectionSubtitle}>
-            Henüz sayfalara yerleşmedi; kesimler burada birikiyor.
+            Bir sayfaya dokun; yeni kesimler oraya eklenir.
           </Text>
         </View>
         <View style={styles.sectionMark} />
@@ -154,31 +215,37 @@ export default function HomeScreen() {
       <View style={styles.emptyIcon}>
         <Sparkles size={22} color={Colors.accent} strokeWidth={2} />
       </View>
-      <Text style={styles.emptyTitle}>İlk sticker’ını yap</Text>
+      <Text style={styles.emptyTitle}>İlk sayfanı aç</Text>
       <Text style={styles.emptyBody}>
-        Kamerayla bir fotoğraf çek ya da galeriden bir kare seç. Nesnenin çevresini
-        çizdiğinde geriye yalnızca o nesne kalacak.
+        Fotoğraf çek ya da galeriden seç; kesilen sticker ilk sayfana yapışacak. Dilediğin
+        kadar sayfa oluşturabilirsin.
       </Text>
+      <ActionButton
+        label="Sayfa oluştur"
+        icon={<Plus size={17} color={Colors.white} strokeWidth={2} />}
+        onPress={() => setCreating(true)}
+      />
     </View>
   );
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
       <FlatList
-        data={stickers}
-        keyExtractor={(item) => item.id}
+        data={library}
+        keyExtractor={(item) => item.page.id}
         numColumns={2}
         renderItem={({ item, index }) => (
-          <StickerCard
-            sticker={item}
+          <PageCard
+            entry={item}
             index={index}
-            onOpen={() => setPreview(item)}
-            onDelete={() => confirmDelete(item)}
+            active={item.page.id === activeId}
+            onOpen={() => openPage(item.page.id)}
+            onOptions={() => openPageOptions(item)}
           />
         )}
         ListHeaderComponent={header}
         ListEmptyComponent={emptyState}
-        columnWrapperStyle={stickers.length > 0 ? styles.columns : undefined}
+        columnWrapperStyle={library.length > 0 ? styles.columns : undefined}
         contentContainerStyle={[
           styles.content,
           { paddingBottom: insets.bottom + Spacing.six },
@@ -186,120 +253,105 @@ export default function HomeScreen() {
         showsVerticalScrollIndicator={false}
       />
 
-      <Modal
-        visible={Boolean(preview)}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        onRequestClose={() => setPreview(null)}>
-        <View style={styles.previewBackdrop}>
-          <View style={[styles.previewCard, { marginBottom: insets.bottom + Spacing.four }]}>
-            <View style={styles.previewHeader}>
-              <View>
-                <Text style={styles.previewEyebrow}>ŞEFFAF PNG</Text>
-                <Text style={styles.previewTitle}>Sticker önizleme</Text>
-              </View>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Önizlemeyi kapat"
-                onPress={() => setPreview(null)}
-                style={styles.previewClose}>
-                <X size={18} color={Colors.inkSoft} strokeWidth={2} />
-              </Pressable>
-            </View>
+      <NameDialog
+        visible={creating}
+        title="Yeni sayfa"
+        description="Sayfaya bir ad ver. Daha sonra değiştirebilirsin."
+        confirmLabel="Oluştur"
+        placeholder={`Sayfa ${library.length + 1}`}
+        initialValue={creating ? suggestPageName() : ''}
+        onCancel={() => setCreating(false)}
+        onSubmit={handleCreatePage}
+      />
 
-            {preview ? <TransparencyPreview uri={preview.uri} height={280} /> : null}
-
-            {preview ? (
-              <Text style={styles.previewMeta}>
-                {preview.width} × {preview.height} px · Şeffaf PNG
-              </Text>
-            ) : null}
-
-            <ActionButton
-              label="Paylaş"
-              variant="secondary"
-              icon={<Share2 size={17} color={Colors.ink} strokeWidth={2} />}
-              onPress={sharePreview}
-              accessibilityHint="Sticker'ı diğer uygulamalara şeffaf PNG olarak gönderir"
-            />
-            <ActionButton
-              label="WhatsApp paketine ekle"
-              variant="secondary"
-              icon={<Send size={17} color={Colors.ink} strokeWidth={2} />}
-              onPress={() => {
-                setPreview(null);
-                router.push('/export');
-              }}
-            />
-            <Text style={styles.previewHint}>
-              Instagram, TikTok ve diğer uygulamalar sticker paketi içe aktarmayı
-              desteklemez; “Paylaş” ile şeffaf PNG olarak gönderebilirsin.
-            </Text>
-
-            <ActionButton
-              label="Sticker'ı sil"
-              variant="danger"
-              icon={<Trash2 size={17} color={Colors.danger} strokeWidth={2} />}
-              onPress={() => {
-                const current = preview;
-                setPreview(null);
-                if (current) {
-                  confirmDelete(current);
-                }
-              }}
-            />
-          </View>
-        </View>
-      </Modal>
+      <NameDialog
+        visible={Boolean(renaming)}
+        title="Sayfayı adlandır"
+        initialValue={renaming?.page.name ?? ''}
+        confirmLabel="Kaydet"
+        onCancel={() => setRenaming(null)}
+        onSubmit={handleRename}
+      />
     </SafeAreaView>
   );
 }
 
-function StickerCard({
-  sticker,
+function PageCard({
+  entry,
   index,
+  active,
   onOpen,
-  onDelete,
+  onOptions,
 }: {
-  sticker: StickerRecord;
+  entry: PageWithStickers;
   index: number;
+  active: boolean;
   onOpen: () => void;
-  onDelete: () => void;
+  onOptions: () => void;
 }) {
-  const rotation = index % 2 === 0 ? '-1.1deg' : '1.1deg';
+  const rotation = index % 2 === 0 ? '-0.9deg' : '0.9deg';
+  const covers = entry.stickers.slice(0, 4);
 
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel="Sticker önizlemesini aç"
+      accessibilityLabel={`${entry.page.name} sayfasını aç`}
+      accessibilityHint={`${entry.stickers.length} sticker`}
       onPress={onOpen}
-      onLongPress={onDelete}
-      delayLongPress={280}
+      onLongPress={onOptions}
+      delayLongPress={300}
       style={({ pressed }) => [
         styles.card,
         { transform: [{ rotate: rotation }] },
         pressed && styles.cardPressed,
       ]}>
-      <View style={styles.cardImageWrap}>
-        <Image
-          source={{ uri: sticker.uri }}
-          style={styles.cardImage}
-          contentFit="contain"
-          transition={120}
-        />
+      <View style={styles.cover}>
+        {covers.length === 0 ? (
+          <View style={styles.coverEmpty}>
+            <Plus size={18} color={Colors.inkFaint} strokeWidth={1.6} />
+          </View>
+        ) : (
+          <View style={styles.coverGrid}>
+            {covers.map((sticker) => (
+              <View
+                key={sticker.id}
+                style={[
+                  styles.coverCell,
+                  covers.length === 1 && styles.coverCellSingle,
+                  covers.length === 2 && styles.coverCellHalf,
+                ]}>
+                <Image
+                  source={{ uri: sticker.uri }}
+                  style={styles.coverImage}
+                  contentFit="contain"
+                  transition={120}
+                />
+              </View>
+            ))}
+          </View>
+        )}
+
+        {active ? (
+          <View style={styles.activeBadge}>
+            <Text style={styles.activeBadgeText}>AKTİF</Text>
+          </View>
+        ) : null}
       </View>
+
       <View style={styles.cardFooter}>
-        <Text style={styles.cardMeta}>
-          {sticker.width}×{sticker.height}
-        </Text>
+        <View style={styles.cardTitleWrap}>
+          <Text style={styles.cardTitle} numberOfLines={1}>
+            {entry.page.name}
+          </Text>
+          <Text style={styles.cardMeta}>{entry.stickers.length} sticker</Text>
+        </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Sticker'ı sil"
+          accessibilityLabel="Sayfa seçenekleri"
           hitSlop={10}
-          onPress={onDelete}
-          style={styles.cardDelete}>
-          <Trash2 size={13} color={Colors.inkFaint} strokeWidth={2} />
+          onPress={onOptions}
+          style={styles.cardMenu}>
+          <Pencil size={13} color={Colors.inkFaint} strokeWidth={2} />
         </Pressable>
       </View>
     </Pressable>
@@ -364,6 +416,13 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
     marginTop: Spacing.one,
   },
+  secondaryRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+  },
+  flex: {
+    flex: 1,
+  },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -408,31 +467,83 @@ const styles = StyleSheet.create({
   cardPressed: {
     opacity: 0.82,
   },
-  cardImageWrap: {
+  cover: {
     aspectRatio: 1,
     borderRadius: Radius.sm,
     backgroundColor: Colors.paperDeep,
     overflow: 'hidden',
   },
-  cardImage: {
+  coverGrid: {
+    flex: 1,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  coverCell: {
+    width: '50%',
+    height: '50%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 4,
+  },
+  coverCellSingle: {
     width: '100%',
     height: '100%',
+    padding: 10,
+  },
+  coverCellHalf: {
+    width: '50%',
+    height: '100%',
+    padding: 6,
+  },
+  coverImage: {
+    width: '100%',
+    height: '100%',
+  },
+  coverEmpty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  activeBadge: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: Radius.pill,
+    backgroundColor: Colors.accent,
+  },
+  activeBadgeText: {
+    fontFamily: Fonts.sansMedium,
+    fontSize: 8,
+    letterSpacing: 0.8,
+    color: Colors.white,
   },
   cardFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 2,
-    paddingTop: 6,
+    paddingTop: 8,
     paddingBottom: 2,
+    gap: Spacing.one,
+  },
+  cardTitleWrap: {
+    flex: 1,
+  },
+  cardTitle: {
+    fontFamily: Fonts.sansMedium,
+    fontSize: 13,
+    color: Colors.ink,
   },
   cardMeta: {
     fontFamily: Fonts.mono,
     fontSize: 9,
     color: Colors.inkFaint,
+    marginTop: 1,
   },
-  cardDelete: {
-    padding: 2,
+  cardMenu: {
+    padding: 4,
   },
   emptyCard: {
     borderWidth: 1.5,
@@ -464,56 +575,6 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     color: Colors.inkSoft,
     textAlign: 'center',
-  },
-  previewBackdrop: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: Colors.overlay,
-    paddingHorizontal: Spacing.four,
-  },
-  previewCard: {
-    backgroundColor: Colors.paper,
-    borderRadius: Radius.lg,
-    padding: Spacing.four,
-    gap: Spacing.three,
-  },
-  previewHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  previewEyebrow: {
-    fontFamily: Fonts.sansMedium,
-    fontSize: 9,
-    letterSpacing: 2,
-    color: Colors.inkFaint,
-  },
-  previewTitle: {
-    fontFamily: Fonts.serif,
-    fontSize: 24,
-    color: Colors.ink,
-    marginTop: 2,
-  },
-  previewClose: {
-    width: 36,
-    height: 36,
-    borderRadius: Radius.pill,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: Colors.paperDeep,
-  },
-  previewMeta: {
-    fontFamily: Fonts.mono,
-    fontSize: 10,
-    color: Colors.inkFaint,
-    textAlign: 'center',
-  },
-  previewHint: {
-    fontFamily: Fonts.sans,
-    fontSize: 11,
-    lineHeight: 16,
-    color: Colors.inkFaint,
-    textAlign: 'center',
-    marginTop: -Spacing.one,
+    marginBottom: Spacing.one,
   },
 });

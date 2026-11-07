@@ -40,6 +40,13 @@ export default function RootLayout() {
             }}
           />
           <Stack.Screen
+            name="page/[id]"
+            options={{
+              animation: 'slide_from_right',
+              contentStyle: { backgroundColor: Colors.paper },
+            }}
+          />
+          <Stack.Screen
             name="editor"
             options={{
               animation: 'slide_from_right',

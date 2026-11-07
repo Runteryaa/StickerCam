@@ -16,7 +16,11 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { ActionButton } from '@/components/ActionButton';
 import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
-import { listStickers, type StickerRecord } from '@/services/stickerService';
+import {
+  loadLibrary,
+  type PageWithStickers,
+  type StickerRecord,
+} from '@/services/stickerService';
 import {
   deletePack,
   exportStickerPack,
@@ -39,6 +43,8 @@ function errorMessage(error: unknown): string {
 export default function ExportScreen() {
   const insets = useSafeAreaInsets();
   const [stickers, setStickers] = useState<StickerRecord[]>([]);
+  const [pages, setPages] = useState<PageWithStickers[]>([]);
+  const [pageFilter, setPageFilter] = useState<string | null>(null);
   const [packs, setPacks] = useState<WhatsAppPack[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [packName, setPackName] = useState('StickerCam Paketim');
@@ -47,7 +53,11 @@ export default function ExportScreen() {
   const initialized = useRef(false);
 
   const refresh = useCallback(() => {
-    const available = listStickers();
+    const library = loadLibrary();
+    const available = library
+      .flatMap((entry) => entry.stickers)
+      .sort((a, b) => b.createdAt - a.createdAt);
+    setPages(library);
     setStickers(available);
     setPacks(listPacks());
 
@@ -62,12 +72,18 @@ export default function ExportScreen() {
     try {
       refresh();
     } catch {
+      setPages([]);
       setStickers([]);
       setPacks([]);
     }
   }, [refresh]);
 
   useFocusEffect(load);
+
+  const visibleStickers =
+    pageFilter === null
+      ? stickers
+      : stickers.filter((sticker) => sticker.pageId === pageFilter);
 
   const selectedStickers = stickers.filter((sticker) => selectedIds.includes(sticker.id));
   const supported = isWhatsAppExportSupported();
@@ -90,8 +106,8 @@ export default function ExportScreen() {
   }, []);
 
   const selectAll = useCallback(() => {
-    setSelectedIds(stickers.slice(0, MAX_PACK_SIZE).map((sticker) => sticker.id));
-  }, [stickers]);
+    setSelectedIds(visibleStickers.slice(0, MAX_PACK_SIZE).map((sticker) => sticker.id));
+  }, [visibleStickers]);
 
   const clearSelection = useCallback(() => {
     setSelectedIds([]);
@@ -236,17 +252,65 @@ export default function ExportScreen() {
           </Pressable>
         </View>
 
-        {stickers.length === 0 ? (
+        {pages.length > 1 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.filterRow}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected: pageFilter === null }}
+              onPress={() => setPageFilter(null)}
+              style={({ pressed }) => [
+                styles.filterChip,
+                pageFilter === null && styles.filterChipActive,
+                pressed && styles.pressed,
+              ]}>
+              <Text
+                style={[
+                  styles.filterChipText,
+                  pageFilter === null && styles.filterChipTextActive,
+                ]}>
+                Tüm sayfalar · {stickers.length}
+              </Text>
+            </Pressable>
+            {pages.map((entry) => (
+              <Pressable
+                key={entry.page.id}
+                accessibilityRole="button"
+                accessibilityState={{ selected: pageFilter === entry.page.id }}
+                onPress={() => setPageFilter(entry.page.id)}
+                style={({ pressed }) => [
+                  styles.filterChip,
+                  pageFilter === entry.page.id && styles.filterChipActive,
+                  pressed && styles.pressed,
+                ]}>
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    pageFilter === entry.page.id && styles.filterChipTextActive,
+                  ]}>
+                  {entry.page.name} · {entry.stickers.length}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
+
+        {visibleStickers.length === 0 ? (
           <View style={styles.emptyCard}>
-            <Text style={styles.emptyTitle}>Henüz sticker yok</Text>
+            <Text style={styles.emptyTitle}>
+              {stickers.length === 0 ? 'Henüz sticker yok' : 'Bu sayfa boş'}
+            </Text>
             <Text style={styles.emptyBody}>
-              Önce kamera veya galeriden bir sticker oluştur, sonra buradan pakete
-              ekle.
+              {stickers.length === 0
+                ? 'Önce kamera veya galeriden bir sticker oluştur, sonra buradan pakete ekle.'
+                : 'Bu sayfada sticker yok. Başka bir sayfa seç ya da o sayfaya sticker ekle.'}
             </Text>
           </View>
         ) : (
           <View style={styles.grid}>
-            {stickers.map((sticker) => {
+            {visibleStickers.map((sticker) => {
               const index = selectedIds.indexOf(sticker.id);
               const isSelected = index >= 0;
               return (
@@ -470,6 +534,30 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.sansMedium,
     fontSize: 11.5,
     color: Colors.inkSoft,
+  },
+  filterRow: {
+    gap: Spacing.two,
+    paddingVertical: Spacing.one,
+  },
+  filterChip: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: 7,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+    borderColor: Colors.paperLine,
+    backgroundColor: Colors.card,
+  },
+  filterChipActive: {
+    borderColor: Colors.accent,
+    backgroundColor: Colors.accentSoft,
+  },
+  filterChipText: {
+    fontFamily: Fonts.sansMedium,
+    fontSize: 11.5,
+    color: Colors.inkSoft,
+  },
+  filterChipTextActive: {
+    color: Colors.accentDeep,
   },
   grid: {
     flexDirection: 'row',

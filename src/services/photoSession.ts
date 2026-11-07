@@ -45,6 +45,23 @@ export function clearPendingPhoto(): void {
 }
 
 /**
+ * Editörün kayıttan sonra döneceği sayfa.
+ *
+ * Kamera/galeri bir sayfa ekranından açıldıysa o sayfanın kimliği tutulur;
+ * böylece kayıt sonrası kullanıcı kaldığı sayfaya döner. Ana ekrandan
+ * açıldıysa kayıt sonrası deftere dönülür.
+ */
+let editorOriginPageId: string | null = null;
+
+export function setEditorOriginPage(pageId: string | null): void {
+  editorOriginPageId = pageId;
+}
+
+export function getEditorOriginPage(): string | null {
+  return editorOriginPageId;
+}
+
+/**
  * Editör açıkken yeni bir fotoğraf gelirse (ör. uygulama açıkken başka bir
  * uygulamadan paylaşım) editörün içeriğini tazelemek için kullanılır.
  */

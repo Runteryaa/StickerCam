@@ -22,6 +22,8 @@ type ActionButtonProps = {
   loading?: boolean;
   style?: StyleProp<ViewStyle>;
   accessibilityHint?: string;
+  /** Alt çubuk gibi dar alanlar için daha küçük düğme. */
+  compact?: boolean;
 };
 
 const VARIANT_STYLES: Record<
@@ -63,6 +65,7 @@ export function ActionButton({
   loading = false,
   style,
   accessibilityHint,
+  compact = false,
 }: ActionButtonProps) {
   const palette = VARIANT_STYLES[variant];
   const isDisabled = disabled || loading;
@@ -77,6 +80,7 @@ export function ActionButton({
       onPress={onPress}
       style={({ pressed }) => [
         styles.base,
+        compact && styles.compact,
         {
           backgroundColor: palette.background,
           borderColor: palette.border,
@@ -91,7 +95,10 @@ export function ActionButton({
       ) : (
         <>
           {icon ? <View style={styles.icon}>{icon}</View> : null}
-          <Text style={[styles.label, { color: palette.text }]}>{label}</Text>
+          <Text
+            style={[styles.label, compact && styles.compactLabel, { color: palette.text }]}>
+            {label}
+          </Text>
         </>
       )}
     </Pressable>
@@ -108,6 +115,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.two,
+  },
+  compact: {
+    minHeight: 44,
+    paddingHorizontal: Spacing.three,
   },
   primaryShadow: {
     shadowColor: Colors.accentDeep,
@@ -131,5 +142,8 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.sansMedium,
     fontSize: 16,
     letterSpacing: 0.2,
+  },
+  compactLabel: {
+    fontSize: 14,
   },
 });
